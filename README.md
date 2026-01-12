@@ -78,7 +78,7 @@ Create a `.env` file in the backend folder using `.env.example`.
 
 5. **Run backend server**
 ```bash
-uvicorn main:app --reload
+uvicorn server:app --reload
 ```
 
 6. **Open a new terminal and install frontend dependencies**
