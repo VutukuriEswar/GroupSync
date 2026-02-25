@@ -127,6 +127,12 @@ yarn start
 - The Multi-Armed Bandit state is stored in the `rl_model_state` collection in MongoDB.
 - It learns continuously as users submit feedback (1-5 stars).
 
+## License
+
+This project is licensed under the **MIT License** — see the [LICENSE](./LICENSE) file for details.
+
+© 2026 Eswar Vutukuri, Kanneganti Lohitha, Meghana Panidapu, Yasasri Bandreddi
+
 ## Acknowledgments
 
 Thanks to OpenRouter for providing accessible AI reasoning models, MongoDB for the database, FastAPI for the high-performance web framework, and the React community for the UI ecosystem. We thank you from the bottom of our hearts for helping us complete this project.
