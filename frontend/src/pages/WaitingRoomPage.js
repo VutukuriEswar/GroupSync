@@ -72,7 +72,6 @@ const WaitingRoomPage = () => {
             </p>
           </CardHeader>
           <CardContent className="space-y-8">
-            {/* Progress */}
             <div>
               <div className="flex items-center justify-between mb-3">
                 <span className="text-lg font-semibold" data-testid="progress-text">
@@ -91,7 +90,6 @@ const WaitingRoomPage = () => {
               </div>
             </div>
 
-            {/* Members List */}
             <div className="space-y-3">
               <h3 className="text-lg font-semibold flex items-center gap-2">
                 <Users className="w-5 h-5" />
@@ -126,7 +124,6 @@ const WaitingRoomPage = () => {
               </div>
             </div>
 
-            {/* Action Button */}
             {submitted >= total && (
               <motion.div
                 initial={{ opacity: 0, y: 20 }}

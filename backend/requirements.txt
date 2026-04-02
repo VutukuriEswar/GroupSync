@@ -3,7 +3,12 @@ uvicorn[standard]
 motor
 pydantic
 PyJWT
-passlib[bcrypt]
 python-dotenv
 numpy
 openai
+requests
+aiohttp
+httpx
+bcrypt
+selenium
+webdriver-manager

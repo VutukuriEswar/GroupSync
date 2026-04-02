@@ -81,11 +81,9 @@ const FeedbackPage = () => {
           </CardHeader>
           <CardContent>
             <form onSubmit={handleSubmit} className="space-y-8">
-              {/* Overall Satisfaction */}
               <div className="space-y-4">
                 <Label className="text-lg font-medium">Overall Satisfaction</Label>
                 <div className="space-y-4">
-                  {/* Star Rating Visual */}
                   <div className="flex justify-center gap-2">
                     {[1, 2, 3, 4, 5].map((rating) => (
                       <motion.button
@@ -99,15 +97,14 @@ const FeedbackPage = () => {
                       >
                         <Star
                           className={`w-12 h-12 transition-colors ${rating <= formData.overall_satisfaction
-                              ? 'fill-primary text-primary'
-                              : 'text-muted'
+                            ? 'fill-primary text-primary'
+                            : 'text-muted'
                             }`}
                         />
                       </motion.button>
                     ))}
                   </div>
 
-                  {/* Slider */}
                   <div className="space-y-3">
                     <Slider
                       value={[formData.overall_satisfaction]}
@@ -127,7 +124,6 @@ const FeedbackPage = () => {
                 </div>
               </div>
 
-              {/* Comments */}
               <div className="space-y-2">
                 <Label htmlFor="comments" className="text-lg font-medium">Additional Comments (Optional)</Label>
                 <Textarea
@@ -141,7 +137,6 @@ const FeedbackPage = () => {
                 />
               </div>
 
-              {/* Submit */}
               <Button
                 type="submit"
                 disabled={submitting}

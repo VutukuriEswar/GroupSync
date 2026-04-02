@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import axios from 'axios';
+import { setAuthToken } from '@/utils/api';
 
 const AuthContext = createContext();
 
@@ -25,6 +25,7 @@ export const AuthProvider = ({ children }) => {
     if (savedToken && savedUser) {
       setToken(savedToken);
       setUser(JSON.parse(savedUser));
+      setAuthToken(savedToken);
     }
 
     if (!savedSessionId) {
@@ -43,6 +44,7 @@ export const AuthProvider = ({ children }) => {
     setUser(userData);
     localStorage.setItem('token', tokenData);
     localStorage.setItem('user', JSON.stringify(userData));
+    setAuthToken(tokenData);
   };
 
   const logout = () => {
@@ -50,6 +52,7 @@ export const AuthProvider = ({ children }) => {
     setUser(null);
     localStorage.removeItem('token');
     localStorage.removeItem('user');
+    setAuthToken(null);
   };
 
   const isGuest = () => {
@@ -57,7 +60,7 @@ export const AuthProvider = ({ children }) => {
   };
 
   return (
-    <AuthContext.Provider value={{ user, token, sessionId, login, logout, isGuest, loading }}>
+    <AuthContext.Provider value={{ user, token, sessionId, login, logout, isGuest, loading, setUser }}>
       {children}
     </AuthContext.Provider>
   );

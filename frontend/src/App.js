@@ -6,6 +6,7 @@ import LandingPage from '@/pages/LandingPage';
 import LoginPage from '@/pages/LoginPage';
 import RegisterPage from '@/pages/RegisterPage';
 import DashboardPage from '@/pages/DashboardPage';
+import ProfilePage from '@/pages/ProfilePage';
 import GroupSetupPage from '@/pages/GroupSetupPage';
 import PreferenceSurveyPage from '@/pages/PreferenceSurveyPage';
 import WaitingRoomPage from '@/pages/WaitingRoomPage';
@@ -23,7 +24,12 @@ function App() {
             <Route path="/login" element={<LoginPage />} />
             <Route path="/register" element={<RegisterPage />} />
             <Route path="/dashboard" element={<DashboardPage />} />
+            <Route path="/profile" element={<ProfilePage />} />
+
             <Route path="/group/create" element={<GroupSetupPage />} />
+
+            <Route path="/group/:groupId" element={<GroupSetupPage />} />
+
             <Route path="/group/:groupId/survey" element={<PreferenceSurveyPage />} />
             <Route path="/group/:groupId/waiting" element={<WaitingRoomPage />} />
             <Route path="/group/:groupId/recommendations" element={<RecommendationsPage />} />

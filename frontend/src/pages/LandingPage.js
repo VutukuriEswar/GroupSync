@@ -10,14 +10,12 @@ const LandingPage = () => {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-background via-background to-primary/5">
-      {/* Hero Section */}
       <motion.div
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         transition={{ duration: 0.6 }}
         className="relative overflow-hidden"
       >
-        {/* Glassmorphic Header */}
         <header className="glass sticky top-0 z-50 px-6 py-4">
           <div className="max-w-7xl mx-auto flex items-center justify-between">
             <div className="flex items-center gap-2">
@@ -43,7 +41,6 @@ const LandingPage = () => {
           </div>
         </header>
 
-        {/* Hero Content */}
         <div className="max-w-7xl mx-auto px-6 py-24">
           <div className="grid lg:grid-cols-2 gap-16 items-center">
             <motion.div
@@ -90,7 +87,6 @@ const LandingPage = () => {
         </div>
       </motion.div>
 
-      {/* Features Section - Tetris Grid */}
       <div className="max-w-7xl mx-auto px-6 py-24">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
@@ -152,7 +148,6 @@ const LandingPage = () => {
         </div>
       </div>
 
-      {/* Privacy Section */}
       <div className="max-w-7xl mx-auto px-6 py-24">
         <motion.div
           initial={{ opacity: 0 }}
@@ -195,7 +190,6 @@ const LandingPage = () => {
         </motion.div>
       </div>
 
-      {/* CTA Section */}
       <div className="max-w-7xl mx-auto px-6 py-24">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
