@@ -12,29 +12,168 @@ import re
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 from dataclasses import dataclass, field
+import concurrent.futures
+
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from webdriver_manager.chrome import ChromeDriverManager
+    from selenium_stealth import stealth
+    SELENIUM_AVAILABLE = True
+except ImportError:
+    SELENIUM_AVAILABLE = False
+
+import time
 
 logger = logging.getLogger(__name__)
 
 FEATURE_DIM = 22
 ACTIONS = ["dining", "movie", "outdoor_relaxed", "outdoor_active", "cultural", "entertainment"]
-TRAVEL_SPEED_KMH = 35.0
+TRAVEL_SPEED_KMH = 15.0
 
 MAX_BUDGET_MAP = {"free": 0, "low": 500, "medium": 1500, "high": 5000}
-
-PREF_ALLOWED = {
-    "indoor": {"dining", "movie", "cultural", "entertainment"},
-    "outdoor": {"outdoor_relaxed", "outdoor_active", "dining"},
-    "both": set(ACTIONS),
-}
 
 GENRES = ["action", "comedy", "drama", "horror", "romance", "thriller", "sci-fi", 
           "animation", "documentary", "family", "adventure", "mystery", "fantasy"]
 CUISINES = ["indian", "chinese", "italian", "mexican", "thai", "japanese", 
             "american", "mediterranean", "korean", "vietnamese", "continental",
-            "mughlai", "north_indian", "seafood", "vegetarian", "vegan"]
+            "mughlai", "north_indian", "south_indian", "seafood", "vegetarian", "vegan",
+            "biryani", "mandi", "street_food", "bakery", "desserts", "irani"]
 ACTIVITY_VIBES = ["relaxing", "adventurous", "romantic", "family_friendly", 
-                  "budget_friendly", "luxurious", "social", "cultural", "active"]
+                  "budget_friendly", "luxurious", "social", "cultural", "active",
+                  "thrilling", "quirky", "competitive", "playful", "chill"]
 TIME_SLOTS = ["morning", "afternoon", "evening", "night", "late_night"]
+
+MEAL_LABEL_MAP = [
+    (6.0,  10.5, "Breakfast"),
+    (10.5, 12.0, "Brunch"),
+    (12.0, 15.0, "Lunch"),
+    (15.0, 18.0, "Snacks / Tea Time"),
+    (18.0, 21.5, "Dinner"),
+    (21.5, 26.0, "Late Night Bites"),
+]
+
+def get_meal_label(arrival_h: float) -> str:
+    for start, end, label in MEAL_LABEL_MAP:
+        if start <= arrival_h < end:
+            return label
+    return "Meal"
+
+PLACE_TYPE_RULES = {
+    "park": {"solo_score": 0.9, "energy": "low", "actions": ["Relaxing walk in", "Enjoy nature at", "Chill out at", "Peaceful time at", "A quiet stroll through"]},
+    "cafe": {"solo_score": 0.95, "energy": "low", "actions": ["Coffee break at", "Grab a snack at", "Relaxing time at", "Social caffeine fix at", "Quick refreshment at"]},
+    "dining": {"solo_score": 0.7, "energy": "medium", "actions": ["Eat at", "Grab food at", "Enjoy a meal at", "Dine at", "Check out the menu at", "Feed the hunger at"]},
+    "mandi": {"solo_score": 0.7, "energy": "medium", "actions": ["Feast on mandi at", "Savour authentic mandi at", "Dig into the biryani at", "Enjoy slow-cooked goodness at"]},
+    "biryani": {"solo_score": 0.7, "energy": "medium", "actions": ["Devour biryani at", "Try the legendary biryani at", "Enjoy a bowl of perfection at"]},
+    "street_food": {"solo_score": 0.8, "energy": "low", "actions": ["Snack your way through", "Hit the street food at", "Grab some local bites at", "Taste the streets at"]},
+    "stadium": {"solo_score": 0.2, "energy": "high", "actions": ["Watch a local match at", "Attend an event at", "Catch some sports at"]},
+    "movie": {"solo_score": 0.8, "energy": "low", "actions": ["Watch a movie at", "Catch a film at", "Movie time at", "Enjoy a cinematic experience at"]},
+    "museum": {"solo_score": 0.85, "energy": "low", "actions": ["Explore history at", "Admire exhibits at", "Cultural immersion at", "Discover local heritage at"]},
+    "entertainment": {"solo_score": 0.6, "energy": "high", "actions": ["Have fun at", "Social hang out at", "Exciting visit to", "Entertainment time at", "Experience the vibe at"]},
+    "arcade": {"solo_score": 0.7, "energy": "high", "actions": ["Play games at", "Battle it out at", "Game time at", "Get your game on at", "Challenge each other at"]},
+    "bowling": {"solo_score": 0.6, "energy": "medium", "actions": ["Bowl a game at", "Strike it up at", "Hit the lanes at", "Bowl and chill at"]},
+    "go-kart": {"solo_score": 0.5, "energy": "high", "actions": ["Race it out at", "Hit the track at", "Floor it at", "Compete on the kart track at"]},
+    "escape_room": {"solo_score": 0.3, "energy": "medium", "actions": ["Crack the puzzle at", "Escape from", "Put your minds together at", "Solve the mystery at"]},
+    "karaoke": {"solo_score": 0.5, "energy": "medium", "actions": ["Sing your heart out at", "Karaoke night at", "Belt it out at", "Show off your voice at"]},
+    "gaming_cafe": {"solo_score": 0.7, "energy": "medium", "actions": ["Game session at", "PC gaming at", "Console battle at", "LAN party vibes at"]},
+    "trampoline": {"solo_score": 0.5, "energy": "high", "actions": ["Jump around at", "Bounce off the walls at", "Go airborne at"]},
+    "laser_tag": {"solo_score": 0.4, "energy": "high", "actions": ["Laser battle at", "Shoot it out at", "Team deathmatch at"]},
+    "outdoor_active": {"solo_score": 0.5, "energy": "high", "actions": ["Get active at", "Play sports at", "Workout at", "Active exploration of", "Energize yourself at"]},
+    "default": {"solo_score": 0.5, "energy": "medium", "actions": ["Visit", "Check out", "Explore", "Spend time at"]}
+}
+
+SIGNATURE_VIBE_TEMPLATES = {
+    "park": [
+        "Unwind in the lush greenery of {venue}, where the gentle breeze and peaceful atmosphere make for a perfect escape.",
+        "Take a moment to reconnect with nature at {venue}, a serene spot ideal for quiet walks and deep conversations.",
+        "Experience the calming vibes of {venue}, where open spaces and local charm provide a much-needed urban retreat."
+    ],
+    "dining": [
+        "Treat your palate to the flavors at {venue}, where authentic {cuisine} and warm hospitality create a memorable meal.",
+        "Indulge in a culinary journey at {venue}, a local favorite known for its vibrant {vibe} and delicious offerings.",
+        "Savor the unique character of {venue}, where every dish tells a story of local tradition and culinary passion."
+    ],
+    "mandi": [
+        "Gather around the legendary slow-cooked mandi at {venue}, a feast that brings people together with every aromatic bite.",
+        "Experience the royal flavors of Yemeni-style mandi at {venue}, where tender meat and fragrant rice create magic.",
+        "Let the rich aroma draw you in at {venue}, a beloved mandi house where communal dining is at its finest."
+    ],
+    "biryani": [
+        "Dig into a pot of aromatic biryani at {venue}, where spice, saffron, and slow-cooking come together in every mouthful.",
+        "Treat yourself to the city's finest biryani at {venue}, a local institution loved by all serious rice lovers.",
+        "Unbox the layers of flavour at {venue}, where biryani is not just food — it's an experience."
+    ],
+    "street_food": [
+        "Hit the buzzing street food scene at {venue}, where quick bites and bold flavours define the local food culture.",
+        "Graze your way through {venue}, sampling the city's most authentic street snacks in one vibrant spot."
+    ],
+    "movie": [
+        "Immerse yourselves in a cinematic escape at {venue}, where the latest stories come to life in a premium setting.",
+        "Enjoy the magic of the big screen at {venue}, a perfect spot for movie lovers to relax and be entertained.",
+        "Switch off and dive into a world of film at {venue}, featuring top-tier comfort and a truly engaging atmosphere."
+    ],
+    "museum": [
+        "Step into the fascinating world of history at {venue}, where every exhibit offers a window into our rich heritage.",
+        "Explore the artistic and cultural soul of the region at {venue}, a place where the past meets the present.",
+        "Ignite your curiosity at {venue}, where captivating displays and local stories wait to be discovered."
+    ],
+    "outdoor_active": [
+        "Get your heart pumping at {venue}, an energetic destination perfect for sports, movement, and group fun.",
+        "Release your energy at {venue}, where the vibrant atmosphere and active vibe keep the excitement going.",
+        "Push your limits and enjoy the outdoors at {venue}, the ideal spot for an action-packed interval in your day."
+    ],
+    "entertainment": [
+        "Experience the high-energy vibe of {venue}, a top-rated spot for entertainment and social engagement.",
+        "Dive into the fun at {venue}, where the lively atmosphere and unique attractions guarantee a great time.",
+        "Make some memories at {venue}, a place where excitement and group connection come together naturally."
+    ],
+    "arcade": [
+        "Level up your day at {venue}, where rows of arcade machines and competitive energy keep things exciting.",
+        "Battle each other across dozens of games at {venue}, the go-to spot for serious fun and friendly rivalry.",
+        "Step into {venue} and embrace your inner gamer — it's all about high scores and big laughs here."
+    ],
+    "bowling": [
+        "Hit the lanes at {venue} for a few frames of friendly competition and good vibes.",
+        "Bowling at {venue} is the perfect mix of chill and competitive — everyone walks away smiling.",
+        "Roll, spare, and strike your way through a fun-filled session at {venue}."
+    ],
+    "go-kart": [
+        "Buckle up and race each other around the track at {venue} — speed, adrenaline, and bragging rights await.",
+        "Feel the rush at {venue}'s go-kart track, where friendly competition fuels the best memories.",
+        "Who's the fastest in the group? Find out at {venue} — the ultimate go-kart showdown."
+    ],
+    "escape_room": [
+        "Put your problem-solving skills to the test at {venue}, where teamwork is the only way out.",
+        "Unlock clues, crack codes, and escape together from {venue}'s immersive puzzle room experience.",
+        "{venue} tests your group's creativity and communication in the most thrilling way possible."
+    ],
+    "karaoke": [
+        "Grab the mic and steal the show at {venue} — no talent required, just confidence and good vibes.",
+        "Belt out your favourite tracks at {venue}, where the stage is yours and every song is a hit.",
+        "Karaoke at {venue} turns a normal evening into an unforgettable memory — sing, laugh, repeat."
+    ],
+    "gaming_cafe": [
+        "Boot up, log in, and battle it out at {venue}, where gaming setups and high-speed connections await.",
+        "Whether it's PC, console, or board games, {venue} has everything for an epic gaming session."
+    ],
+    "trampoline": [
+        "Bounce, flip, and soar at {venue} — the trampoline park that turns adults back into kids.",
+        "Jump your way to a great mood at {venue}, where every leap comes with a burst of pure fun."
+    ],
+    "laser_tag": [
+        "Gear up and light up the arena at {venue} in an adrenaline-charged laser tag battle.",
+        "Team up or go solo at {venue}'s laser tag zone — strategy, stealth, and a whole lot of fun."
+    ],
+    "default": [
+        "Discover the unique atmosphere of {venue}, a local gem that reflects the true character of the city.",
+        "Enjoy a tailored experience at {venue}, chosen specifically to match your group's preferred energy and style.",
+        "Make the most of your visit to {venue}, a standout destination that always delivers a great vibe."
+    ]
+}
 
 @dataclass
 class ActivityAttributes:
@@ -43,11 +182,14 @@ class ActivityAttributes:
     vibes: List[str] = field(default_factory=list)
     time_slots: List[str] = field(default_factory=list)
     suitable_for_groups: bool = True
-    indoor_outdoor: str = "both"
     age_restriction: str = "all"
     booking_required: bool = False
     popularity_score: float = 0.5
     rating: float = 3.5
+    action_title: str = ""
+    energy_profile: str = "medium"
+    solo_score: float = 0.5
+    exact_start_times: List[int] = field(default_factory=list)
     
     def to_feature_vector(self, pref_genres: List[str], pref_cuisines: List[str], 
                           pref_vibes: List[str], time_slot: str) -> np.ndarray:
@@ -64,8 +206,6 @@ class ActivityAttributes:
             1.0 if self.suitable_for_groups else 0.0,
             self.popularity_score,
             self.rating / 5.0,
-            1.0 if self.indoor_outdoor in ("indoor", "both") else 0.0,
-            1.0 if self.indoor_outdoor in ("outdoor", "both") else 0.0,
             1.0 if self.age_restriction == "all" else 0.0,
             1.0 if self.booking_required else 0.0,
             len(self.genres) / 5.0,
@@ -78,6 +218,79 @@ class ActivityAttributes:
             1.0 if "night" in self.time_slots else 0.0,
             1.0,
         ], dtype=np.float64)
+
+@dataclass
+class ProxyManager:
+    def __init__(self):
+        self.user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
+        ]
+        self.proxies = [
+            None,
+        ]
+        self._proxy_index = 0
+
+    def get_random_ua(self) -> str:
+        return random.choice(self.user_agents)
+
+    def get_next_proxy(self) -> Optional[str]:
+        if not self.proxies: return None
+        p = self.proxies[self._proxy_index]
+        self._proxy_index = (self._proxy_index + 1) % len(self.proxies)
+        return p
+
+class BrowserManager:
+    def __init__(self):
+        self.proxy_mgr = ProxyManager()
+        self._service = None
+
+    def _init_service(self):
+        if not self._service:
+            self._service = Service(ChromeDriverManager().install())
+        return self._service
+
+    def get_stealth_driver(self):
+        options = Options()
+        options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--window-size=1920,1080")
+        
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
+        
+        ua = self.proxy_mgr.get_random_ua()
+        options.add_argument(f"user-agent={ua}")
+        
+        proxy = self.proxy_mgr.get_next_proxy()
+        if proxy:
+            options.add_argument(f'--proxy-server={proxy}')
+
+        driver = webdriver.Chrome(service=self._init_service(), options=options)
+        
+        driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
+            'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
+        })
+        
+        if SELENIUM_AVAILABLE:
+            try:
+                stealth(driver,
+                    languages=["en-US", "en"],
+                    vendor="Google Inc.",
+                    platform="Win32",
+                    webgl_vendor="Intel Inc.",
+                    renderer="Intel Iris OpenGL Engine",
+                    fix_hairline=True,
+                )
+            except Exception as e:
+                logger.warning(f"Stealth application failed: {e}")
+        
+        return driver
 
 @dataclass
 class ActivityItem:
@@ -109,9 +322,12 @@ class ActivityItem:
             "vibes": self.attributes.vibes,
             "time_slots": self.attributes.time_slots,
             "suitable_for_groups": self.attributes.suitable_for_groups,
-            "indoor_outdoor": self.attributes.indoor_outdoor,
             "rating": self.attributes.rating,
             "popularity_score": self.attributes.popularity_score,
+            "action_title": self.attributes.action_title,
+            "energy_profile": self.attributes.energy_profile,
+            "solo_score": self.attributes.solo_score,
+            "exact_start_times": self.attributes.exact_start_times,
             "source": self.source,
             "url": self.url,
             "address": self.address,
@@ -128,9 +344,12 @@ class ActivityItem:
             vibes=data.get("vibes", []),
             time_slots=data.get("time_slots", []),
             suitable_for_groups=data.get("suitable_for_groups", True),
-            indoor_outdoor=data.get("indoor_outdoor", "both"),
             rating=data.get("rating", 3.5),
             popularity_score=data.get("popularity_score", 0.5),
+            action_title=data.get("action_title", ""),
+            energy_profile=data.get("energy_profile", "medium"),
+            solo_score=data.get("solo_score", 0.5),
+            exact_start_times=data.get("exact_start_times", [])
         )
         return cls(
             name=data.get("name", ""),
@@ -148,20 +367,253 @@ class ActivityItem:
             description=data.get("description", ""),
         )
 
+class GoogleMapsScraper:
+    def __init__(self, browser_mgr: BrowserManager):
+        self.browser_mgr = browser_mgr
+
+    def scrape_nearby(self, category: str, lat: float, lon: float, query_prefix: str = "") -> List[Dict]:
+        if not SELENIUM_AVAILABLE: return []
+
+        search_query = f"{query_prefix} {category}".strip()
+        url = f"https://www.google.com/maps/search/{search_query.replace(' ', '+')}/@{lat},{lon},15z"
+        
+        driver = self.browser_mgr.get_stealth_driver()
+        results = []
+        try:
+            logger.info(f"[Selenium] Maps Stealth Nav: {url}")
+            driver.get(url)
+            
+            time.sleep(random.uniform(2, 4))
+            
+            wait = WebDriverWait(driver, 15)
+            try:
+                wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div[role='feed'], .hfpxzc")))
+            except Exception:
+                logger.warning("[Selenium] Maps Container Timeout")
+                return []
+
+            elements = driver.find_elements(By.CSS_SELECTOR, "div[role='article'], .hfpxzc")
+            for el in elements[:10]:
+                try:
+                    if random.random() > 0.7: time.sleep(random.uniform(0.1, 0.4))
+                    
+                    name = el.get_attribute("aria-label") or "Unknown"
+                    if not name or name == "Unknown":
+                        try: name = el.find_element(By.CSS_SELECTOR, ".qBF1Pd").text
+                        except: pass
+
+                    rating = 4.0
+                    try:
+                        rating_text = el.find_element(By.CSS_SELECTOR, ".MW4etd").text
+                        if rating_text: rating = float(rating_text)
+                    except: pass
+
+                    results.append({
+                        "name": name,
+                        "rating": rating,
+                        "lat": lat + random.uniform(-0.005, 0.005),
+                        "lon": lon + random.uniform(-0.005, 0.005),
+                        "source": "google_maps_scrape"
+                    })
+                except: continue
+        except Exception as e:
+            logger.error(f"[Selenium] Maps Scrape Failure: {e}")
+        finally:
+            driver.quit()
+        return results
+
+class BookMyShowScraper:
+    def __init__(self, browser_mgr: BrowserManager):
+        self.browser_mgr = browser_mgr
+
+    def _parse_bms_time(self, time_str: str) -> int:
+        time_str = time_str.strip().upper()
+        try:
+            if "AM" in time_str or "PM" in time_str:
+                t = datetime.strptime(time_str, "%I:%M %p")
+            else:
+                t = datetime.strptime(time_str, "%H:%M")
+            return t.hour * 60 + t.minute
+        except:
+            return None
+
+    def _scrape_theatres_and_timings(self, driver, movie_url: str) -> List[Dict]:
+        venues = []
+        try:
+            logger.info(f"[Selenium] Navigating to movie page: {movie_url}")
+            driver.get(movie_url)
+            time.sleep(3)
+            
+            buttons = driver.find_elements(By.XPATH, "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'book tickets')]")
+            if buttons:
+                driver.execute_script("arguments[0].click();", buttons[0])
+                time.sleep(4)
+                
+                format_pills = driver.find_elements(By.XPATH, "//span[contains(text(), '2D')]")
+                if format_pills:
+                    try:
+                        driver.execute_script("arguments[0].click();", format_pills[0])
+                        time.sleep(3)
+                    except: pass
+
+                elements = driver.find_elements(By.CSS_SELECTOR, "ul#venuelist li")
+                for el in elements[:3]:
+                    v_name_tag = el.find_elements(By.CSS_SELECTOR, ".venue-info-text, .__venue-name")
+                    v_name = v_name_tag[0].text.strip() if v_name_tag else "Local Cinema"
+                        
+                    showtime_pills = el.find_elements(By.CSS_SELECTOR, "a.showtime-pill, div.showtime-pill")
+                    timings = []
+                    cost = 150
+                    for pill in showtime_pills[:5]:
+                        t_text = pill.text.strip()
+                        if ":" in t_text:
+                            price_str = pill.get_attribute("data-price")
+                            if price_str and price_str.isdigit(): cost = int(price_str)
+                            t_min = self._parse_bms_time(t_text)
+                            if t_min is not None: timings.append(t_min)
+                    if timings:
+                        venues.append({"name": v_name, "cost": cost, "timings": timings})
+        except Exception as e:
+            logger.warning(f"[Scraper] BMS Deep scrape failed: {e}")
+        return venues
+
+    def scrape_movies(self, city: str) -> List[Dict]:
+        if not SELENIUM_AVAILABLE: return []
+        
+        clean_city = city.lower().replace(" ", "-")
+        url = f"https://in.bookmyshow.com/explore/movies-{clean_city}"
+        
+        driver = self.browser_mgr.get_stealth_driver()
+        movies = []
+        try:
+            logger.info(f"[Selenium] BMS Stealth Nav: {url}")
+            driver.get(url)
+            time.sleep(random.uniform(3, 5))
+            
+            driver.execute_script("window.scrollTo(0, 500);")
+            time.sleep(2)
+            
+            elements = driver.find_elements(By.CSS_SELECTOR, "a[href*='/movies/']")
+            movie_cards = []
+            
+            for el in elements[:5]:
+                try:
+                    href = el.get_attribute("href")
+                    if not href: continue
+                    text = el.text.split("\n")
+                    if len(text) < 1: continue
+                    
+                    title = text[0]
+                    rating = 4.0
+                    genre = "Drama"
+                    
+                    for line in text:
+                        if "/10" in line:
+                            try: rating = float(line.split("/")[0])
+                            except: pass
+                        if any(g in line for g in ["Action", "Comedy", "Thriller", "Horror", "Drama", "Sci-Fi", "Animation"]):
+                            genre = line
+                    
+                    movie_cards.append({
+                        "name": title,
+                        "rating": rating,
+                        "genre": genre,
+                        "url": href
+                    })
+                except: continue
+
+            for card in movie_cards[:3]:
+                card["theatres"] = self._scrape_theatres_and_timings(driver, card["url"])
+                movies.append(card)
+                time.sleep(3)
+                
+        except Exception as e:
+            logger.error(f"[Selenium] BMS Scrape Failure: {e}")
+        finally:
+            try: driver.quit()
+            except: pass
+            
+        return movies
+
 class WebDataFetcher:
     def __init__(self):
         self._semaphore = asyncio.Semaphore(3)
         self._cache: Dict[str, Tuple[List[Dict], float]] = {}
         self._cache_duration = 3600
         self._cli_available = None
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+        self._browser_mgr = BrowserManager()
+        self._maps_scraper = GoogleMapsScraper(self._browser_mgr)
+        self._bms_scraper = BookMyShowScraper(self._browser_mgr)
+
+    def _enrich_item(self, item: ActivityItem, place_type: str) -> ActivityItem:
+        rules = PLACE_TYPE_RULES.get(place_type, PLACE_TYPE_RULES["default"])
+        item.attributes.energy_profile = rules["energy"]
+        item.attributes.solo_score = rules["solo_score"]
+        action = random.choice(rules["actions"])
+        item.attributes.action_title = f"{action} {item.name}"
+        return item
+
+    async def _search_selenium_fallback(self, category: str, lat: float, lon: float, query_prefix: str = "") -> List[ActivityItem]:
+        loop = asyncio.get_event_loop()
+        try:
+            results = await loop.run_in_executor(
+                self._executor, 
+                self._maps_scraper.scrape_nearby,
+                category, lat, lon, query_prefix
+            )
+            
+            items = []
+            engine_cat = category
+            if category == "cinema": engine_cat = "movie"
+            elif category == "restaurant": engine_cat = "dining"
+            elif "outdoor relaxed" in category: engine_cat = "outdoor_relaxed"
+            elif "outdoor active" in category: engine_cat = "outdoor_active"
+            elif category == "attractions": engine_cat = "entertainment"
+
+            for r in results:
+                new_item = ActivityItem(
+                    name=r["name"],
+                    category=engine_cat,
+                    cost=random.randint(200, 1000),
+                    duration=120,
+                    lat=r["lat"],
+                    lon=r["lon"],
+                    attributes=ActivityAttributes(
+                        vibes=["social", "popular"],
+                        rating=r["rating"],
+                        popularity_score=0.8
+                    ),
+                    source="google_maps_scrape"
+                )
+                self._enrich_item(new_item, engine_cat)
+                items.append(new_item)
+            return items
+        except Exception as e:
+            logger.error(f"Selenium fallback failed: {e}")
+            return []
     
+    def _is_generic_name(self, name: str) -> bool:
+        if not name: return True
+        generics = [
+            "park", "garden", "way", "node", "hotel", "restaurant", "cafe", 
+            "stadium", "museum", "caves", "entrance", "playground", "temple",
+            "mosque", "church", "toilet", "parking", "bus stop", "atm", "hospital",
+            "medical", "school", "college", "university", "bank", "shop", "office"
+        ]
+        n = name.lower().strip()
+        if n in generics or len(n) < 3: return True
+        if n.startswith("the ") and n[4:] in generics: return True
+        if n.startswith("local ") and n[6:] in generics: return True
+        if n.replace(".", "").replace(" ", "").isdigit(): return True
+        return False
+
     async def _overpass_query(self, query: str) -> List[Dict]:
         mirrors = [
             "https://overpass-api.de/api/interpreter",
-            "https://overpass.kumi.systems/api/interpreter",
-            "https://overpass.openstreetmap.ru/api/interpreter",
             "https://overpass.osm.ch/api/interpreter",
-            "https://overpass.osm.rambler.ru/cgi/interpreter",
+            "https://overpass.kumi.systems/api/interpreter",
+            "https://z.overpass-api.de/api/interpreter",
         ]
         max_retries = 3
         for i in range(max_retries):
@@ -185,56 +637,114 @@ class WebDataFetcher:
     def _get_cache_key(self, query: str, location: str) -> str:
         return f"{query}_{location}".lower().replace(" ", "_")
     
-    async def search_movies(self, lat: float, lon: float, genres: List[str] = None) -> List[ActivityItem]:
-        cache_key = f"movies_real_{lat}_{lon}"
+    async def search_movies(self, lat: float, lon: float, city: str = "Mumbai", genres: List[str] = None) -> List[ActivityItem]:
+        cache_key = f"movies_real_{lat}_{lon}_{city}"
         if cache_key in self._cache:
             data, ts = self._cache[cache_key]
             if datetime.now().timestamp() - ts < self._cache_duration:
                 return [ActivityItem.from_dict(d) for d in data]
+        
+        logger.info(f"[Fetch] Attempting localized BookMyShow search for {city}...")
+        results = await asyncio.get_event_loop().run_in_executor(
+            self._executor, self._bms_scraper.scrape_movies, city
+        )
+        
+        items = []
+        
+        for r in results:
+            if r.get("theatres"):
+                for t in r["theatres"]:
+                    if not t["timings"]: continue
+                    items.append(ActivityItem(
+                        name=f"{t['name']}: {r['name']}",
+                        category="movie",
+                        cost=t["cost"],
+                        duration=150,
+                        lat=lat,
+                        lon=lon,
+                        attributes=ActivityAttributes(
+                            genres=[r['genre']],
+                            rating=r['rating'],
+                            popularity_score=0.9,
+                            exact_start_times=t["timings"]
+                        ),
+                        source="live_bms_deep_scrape"
+                    ))
+        
+        if items:
+            logger.info(f"[Fetch] Successfully pulled {len(items)} real-time movie slots from BMS deep scrape.")
+            self._cache[cache_key] = ([i.to_dict() for i in items], datetime.now().timestamp())
+            return items
+
         query = f"""[out:json][timeout:25];
         (node["amenity"="cinema"](around:10000,{lat},{lon});
          way["amenity"="cinema"](around:10000,{lat},{lon}););
         out center;"""
         elements = await self._overpass_query(query)
-        if not elements: return self._get_sample_movies("Current", genres)
-        movies_pool = []
-        try:
-            search_query = "current movies playing in Vijayawada cinemas today"
-            results = await self._search_web_internal(search_query)
-            movies_pool = self._extract_movie_list_from_search(results)
-        except Exception as e:
-            logger.warning(f"Movie scraping failed: {e}")
-            movies_pool = ["Global Blockbuster", "Action Epic", "Comedy Special"]
-        items = []
+        
+        if not elements:
+            logger.info("[Fetch] Overpass failed for cinemas. Using Maps fallback...")
+            cinema_locs = await self._search_selenium_fallback("cinema", lat, lon, "cinemas near")
+            elements = [{"lat": c.lat, "lon": c.lon, "tags": {"name": c.name}} for c in cinema_locs]
+
+        movie_pool = results[:3] if results else [
+            {"name": "Current Blockbuster", "genre": "Action", "rating": 4.5},
+            {"name": "Romantic Escape", "genre": "Romance", "rating": 4.2},
+            {"name": "Midnight Thrills", "genre": "Thriller", "rating": 4.0}
+        ]
+
         for el in elements:
-            base_name = el.get("tags", {}).get("name", "Cinema")
-            movie_title = random.choice(movies_pool) if movies_pool else "Now Playing"
-            display_name = f"{base_name}: {movie_title}"
-            items.append(ActivityItem(
-                name=display_name,
-                category="movie",
-                cost=random.randint(250, 450),
-                duration=150,
-                lat=el.get("lat") or el.get("center", {}).get("lat", lat),
-                lon=el.get("lon") or el.get("center", {}).get("lon", lon),
-                attributes=ActivityAttributes(
-                    genres=genres or ["drama", "action"],
-                    vibes=["entertaining", "social"],
-                    time_slots=["afternoon", "evening", "night"],
-                    indoor_outdoor="indoor",
-                    popularity_score=0.8,
-                    rating=4.2
-                ),
-                source="overpass_scraped"
-            ))
+            base_name = el.get("tags", {}).get("name", "Local Cinema")
+            c_lat = el.get("lat") or el.get("center", {}).get("lat", lat)
+            c_lon = el.get("lon") or el.get("center", {}).get("lon", lon)
+            for r in movie_pool:
+                items.append(ActivityItem(
+                    name=f"{base_name}: {r['name']}",
+                    category="movie",
+                    cost=150,
+                    duration=150,
+                    lat=c_lat,
+                    lon=c_lon,
+                    attributes=ActivityAttributes(
+                        genres=[r['genre']],
+                        rating=r['rating'],
+                        popularity_score=0.9
+                    ),
+                    source="live_cinema_node"
+                ))
+
+        if not items:
+            logger.warning("[Fetch] Movie search completely failed. Using internal samples.")
+            return self._get_sample_movies("Current", genres)
+            
         self._cache[cache_key] = ([i.to_dict() for i in items], datetime.now().timestamp())
         return items
 
-    async def _search_web_internal(self, query: str) -> List[Dict]:
-        return [{"name": "Dhurandhar", "snippet": "Action"}, {"name": "Project Hail Mary", "snippet": "Sci-Fi"}]
+    async def _search_web_internal(self, query: str, preferred_genres: List[str] = None) -> List[Dict]:
+        movie_database = {
+            "action": ["Vanguard Protocol", "Shadow Operative", "Steel Torrent", "Urban Warfare: Zero Hour", "The Last Mercenary"],
+            "comedy": ["Laugh Out Loud", "The Misadventures of Mike", "Gigglestorm", "Family Feud: The Movie", "Office Chaos"],
+            "drama": ["Echoes of Silence", "The Long Road Home", "Fractured Reality", "Beyond the Horizon", "Legacy of the Brave"],
+            "horror": ["Nightshade", "The Whispering Woods", "Crimson Peak", "Descent into Darkness", "The Unseen"],
+            "sci-fi": ["Nebula Horizon", "Quantum Leap", "Cyberpunk Revolt", "The Andromeda Strain", "Stellar Voyage"],
+            "thriller": ["Deadly Pursuit", "The Silent Witness", "Infiltration", "Cold Trail", "Point of No Return"],
+            "romance": ["Love in Bloom", "Autumn Whispers", "Eternal Flame", "Heartbeat City", "The Secret Letter"],
+            "animation": ["Cloudy with a Chance of Magic", "The Whimsical Woods", "Intergalactic Pets", "Little Heroes", "Skyward Journey"],
+        }
+        
+        results = []
+        target_genres = preferred_genres if preferred_genres else list(movie_database.keys())
+        
+        for g in target_genres:
+            if g in movie_database:
+                for m in movie_database[g]:
+                    results.append({"name": m, "snippet": f"A thrilling {g} movie showing now.", "genre": g})
+        
+        random.shuffle(results)
+        return results[:15]
 
-    def _extract_movie_list_from_search(self, results: List) -> List[str]:
-        return ["Dhurandhar The Revenge", "Project Hail Mary", "Ustaad Bhagat Singh", "The Super Mario Galaxy Movie", "Ready Or Not 2"]
+    def _extract_movie_list_from_search(self, results: List, genres: List[str] = None) -> List[str]:
+        return [r["name"] for r in results]
     
     async def search_restaurants(self, lat: float, lon: float, cuisines: List[str] = None,
                                  budget: str = "medium") -> List[ActivityItem]:
@@ -246,8 +756,8 @@ class WebDataFetcher:
         query = f"""
         [out:json][timeout:25];
         (
-          node["amenity"~"restaurant|cafe|fast_food|pizzeria"](around:5000,{lat},{lon});
-          way["amenity"~"restaurant|cafe|fast_food|pizzeria"](around:5000,{lat},{lon});
+          node["amenity"~"restaurant|cafe|fast_food|pizzeria"](around:4000,{lat},{lon});
+          way["amenity"~"restaurant|cafe|fast_food|pizzeria"](around:4000,{lat},{lon});
         );
         out center;
         """
@@ -255,11 +765,13 @@ class WebDataFetcher:
         items = []
         for el in elements:
             tags = el.get("tags", {})
-            name = tags.get("name", "Local Eatery")
+            name = tags.get("name")
+            if not name or self._is_generic_name(name):
+                continue
             cuisine_tag = tags.get("cuisine", "").lower().split(";")
             found_cuisines = [c.strip() for c in cuisine_tag if c.strip() in CUISINES] or ["indian"]
             cost = self._get_realistic_cost("dining", tags.get("cuisine", ""), budget)
-            items.append(ActivityItem(
+            new_item = ActivityItem(
                 name=name,
                 category="dining",
                 cost=cost,
@@ -270,53 +782,96 @@ class WebDataFetcher:
                     cuisines=found_cuisines,
                     vibes=["social", "casual"],
                     time_slots=["morning", "afternoon", "evening", "night"],
-                    indoor_outdoor="indoor",
                     rating=random.uniform(4.0, 4.8)
                 ),
                 source="overpass"
-            ))
+            )
+            self._enrich_item(new_item, "dining")
+            items.append(new_item)
         if not items:
-            items = self._get_sample_restaurants("Current", cuisines, budget)
+            logger.info("[Fetch] Overpass returned no restaurants. Triggering Selenium fallback...")
+            items = await self._search_selenium_fallback("restaurant", lat, lon, " ".join(cuisines or []))
+            if not items:
+                items = self._get_sample_restaurants("Current", cuisines, budget)
         self._cache[cache_key] = ([i.to_dict() for i in items], datetime.now().timestamp())
         return items
     
     async def search_events(self, lat: float, lon: float, event_type: str = "all") -> List[ActivityItem]:
         query = f"""
-        [out:json][timeout:25];
+        [out:json][timeout:30];
         (
-          node["tourism"~"attraction|museum|gallery|zoo|theme_park"](around:15000,{lat},{lon});
-          way["tourism"~"attraction|museum|gallery|zoo|theme_park"](around:15000,{lat},{lon});
-          node["leisure"~"amusement_arcade|bowling_alley|karting|sports_centre"](around:15000,{lat},{lon});
-          way["leisure"~"amusement_arcade|bowling_alley|karting|sports_centre"](around:15000,{lat},{lon});
+          node["tourism"~"attraction|museum|gallery|zoo|theme_park"](around:4000,{lat},{lon});
+          way["tourism"~"attraction|museum|gallery|zoo|theme_park"](around:4000,{lat},{lon});
+          node["leisure"~"amusement_arcade|bowling_alley|karting|laser_game|escape_game|trampoline_park|miniature_golf|water_park"](around:4000,{lat},{lon});
+          way["leisure"~"amusement_arcade|bowling_alley|karting|laser_game|escape_game|trampoline_park|miniature_golf|water_park"](around:4000,{lat},{lon});
+          node["amenity"~"nightclub|casino|theatre"](around:4000,{lat},{lon});
+          way["amenity"~"nightclub|casino|theatre"](around:4000,{lat},{lon});
+          node["sport"~"climbing|skating|swimming|tennis|badminton|squash|billiards|table_tennis"](around:4000,{lat},{lon});
+          way["sport"~"climbing|skating|swimming|tennis|badminton|squash|billiards|table_tennis"](around:4000,{lat},{lon});
         );
         out center;
         """
         elements = await self._overpass_query(query)
         items = []
-        blacklist = ["aadhar", "seva", "kendram", "office", "bank", "department", 
-                     "municipality", "development", "service", "center", "corporation"]
+        blacklist = ["aadhar", "seva", "kendram", "office", "bank", "department",
+                     "municipality", "development", "service", "center", "corporation", "stadium"]
+
+        FUN_VENUE_MAP = {
+            "amusement_arcade": ("arcade", "entertainment", ["social", "playful", "competitive"], 75),
+            "bowling_alley":    ("bowling", "entertainment", ["social", "competitive", "family_friendly"], 90),
+            "karting":          ("go-kart", "entertainment", ["thrilling", "competitive", "social"], 60),
+            "laser_game":       ("laser_tag", "entertainment", ["thrilling", "competitive", "social"], 50),
+            "escape_game":      ("escape_room", "entertainment", ["adventurous", "social", "competitive"], 70),
+            "trampoline_park":  ("trampoline", "entertainment", ["active", "thrilling", "playful"], 60),
+            "miniature_golf":   ("entertainment", "entertainment", ["social", "playful", "family_friendly"], 60),
+            "water_park":       ("outdoor_active", "entertainment", ["thrilling", "active", "social"], 180),
+        }
+
         for el in elements:
             tags = el.get("tags", {})
-            name = tags.get("name", "Local Attraction")
+            name = tags.get("name")
+            if not name or self._is_generic_name(name):
+                continue
             if any(term in name.lower() for term in blacklist):
                 continue
-            items.append(ActivityItem(
+
+            leisure_val = tags.get("leisure", "")
+            amenity_val = tags.get("amenity", "")
+            tourism_val = tags.get("tourism", "")
+
+            if leisure_val in FUN_VENUE_MAP:
+                place_type, category, vibes, duration = FUN_VENUE_MAP[leisure_val]
+            elif amenity_val in ("nightclub", "casino"):
+                place_type, category, vibes, duration = "entertainment", "entertainment", ["social", "adventurous"], 120
+            elif tourism_val == "museum" or "museum" in name.lower():
+                place_type, category, vibes, duration = "museum", "cultural", ["cultural", "social"], 90
+            elif tags.get("sport"):
+                place_type, category, vibes, duration = "outdoor_active", "entertainment", ["active", "social", "competitive"], 90
+            else:
+                place_type, category, vibes, duration = "entertainment", "entertainment", ["social", "entertaining"], 120
+
+            new_item = ActivityItem(
                 name=name,
-                category="cultural" if "museum" in tags.values() else "entertainment",
-                cost=random.randint(100, 500),
-                duration=120,
+                category=category,
+                cost=random.randint(100, 700),
+                duration=duration,
                 lat=el.get("lat") or el.get("center", {}).get("lat", lat),
                 lon=el.get("lon") or el.get("center", {}).get("lon", lon),
                 attributes=ActivityAttributes(
-                    vibes=["cultural", "social"],
-                    time_slots=["morning", "afternoon", "evening"],
-                    indoor_outdoor="indoor",
-                    rating=4.2
+                    vibes=vibes,
+                    time_slots=["afternoon", "evening", "night"],
+                    rating=random.uniform(4.0, 4.8),
+                    popularity_score=random.uniform(0.75, 0.95)
                 ),
                 source="overpass"
-            ))
+            )
+            self._enrich_item(new_item, place_type)
+            items.append(new_item)
         if not items:
-            items = self._get_sample_events("Current", event_type)
+            logger.info(f"[Fetch] Overpass returned no {event_type} events. Triggering Selenium fallback...")
+            items = await self._search_selenium_fallback(event_type if event_type != "all" else "attractions", lat, lon)
+            if not items:
+                items = self._get_sample_events("Current", event_type)
         return items
     
     async def search_outdoor_activities(self, lat: float, lon: float, activity_type: str,
@@ -324,8 +879,8 @@ class WebDataFetcher:
         query = f"""
         [out:json][timeout:25];
         (
-          node["leisure"~"park|garden|nature_reserve|playground"](around:8000,{lat},{lon});
-          way["leisure"~"park|garden|nature_reserve|playground"](around:8000,{lat},{lon});
+          node["leisure"~"park|garden|nature_reserve|playground"](around:4000,{lat},{lon});
+          way["leisure"~"park|garden|nature_reserve|playground"](around:4000,{lat},{lon});
         );
         out center;
         """
@@ -335,10 +890,15 @@ class WebDataFetcher:
                      "municipality", "development", "service", "center", "corporation"]
         for el in elements:
             tags = el.get("tags", {})
-            name = tags.get("name", "Local Park")
+            name = tags.get("name")
+            if not name or self._is_generic_name(name):
+                continue
             if any(term in name.lower() for term in blacklist):
                 continue
-            items.append(ActivityItem(
+            
+            p_type = "park" if "park" in tags.values() else "outdoor_active"
+            
+            new_item = ActivityItem(
                 name=name,
                 category="outdoor_relaxed",
                 cost=0,
@@ -348,15 +908,17 @@ class WebDataFetcher:
                 attributes=ActivityAttributes(
                     vibes=["relaxing", "family_friendly"],
                     time_slots=["morning", "afternoon", "evening"],
-                    indoor_outdoor="outdoor",
                     rating=4.5
                 ),
                 source="overpass"
-            ))
-        if items:
-            pass
+            )
+            self._enrich_item(new_item, p_type)
+            items.append(new_item)
         if not items:
-            items = self._get_sample_outdoor("Current", activity_type)
+            query_str = "parks nearby" if "relaxed" in activity_type else "activities nearby"
+            items = await self._search_selenium_fallback(activity_type.replace("_", " "), lat, lon, query_prefix=query_str)
+            if not items:
+                items = self._get_sample_outdoor("Current", activity_type)
         return items
 
     def _get_realistic_cost(self, category: str, sub_type: str, budget_tier: str) -> int:
@@ -411,7 +973,6 @@ class WebDataFetcher:
                     vibes=["entertaining", "social"],
                     time_slots=["afternoon", "evening", "night"],
                     suitable_for_groups=True,
-                    indoor_outdoor="indoor",
                     booking_required=True,
                     popularity_score=random.uniform(0.6, 1.0),
                     rating=random.uniform(3.0, 4.5),
@@ -453,7 +1014,6 @@ class WebDataFetcher:
                     vibes=self._extract_vibes(snippet),
                     time_slots=["morning", "afternoon", "evening", "night"],
                     suitable_for_groups=True,
-                    indoor_outdoor="indoor",
                     popularity_score=random.uniform(0.5, 1.0),
                     rating=random.uniform(3.5, 4.8),
                 ),
@@ -489,7 +1049,6 @@ class WebDataFetcher:
                     vibes=self._extract_vibes(snippet),
                     time_slots=time_slots,
                     suitable_for_groups=True,
-                    indoor_outdoor="indoor" if "indoor" in snippet.lower() else "outdoor",
                     booking_required=True,
                     popularity_score=random.uniform(0.6, 1.0),
                     rating=random.uniform(3.5, 4.5),
@@ -528,7 +1087,6 @@ class WebDataFetcher:
                     vibes=self._extract_vibes(snippet),
                     time_slots=["morning", "afternoon", "evening"],
                     suitable_for_groups=True,
-                    indoor_outdoor="outdoor",
                     popularity_score=random.uniform(0.5, 0.9),
                     rating=random.uniform(3.5, 4.5),
                 ),
@@ -674,55 +1232,47 @@ class WebDataFetcher:
         return random.randint(5, 25)
 
     def _get_sample_movies(self, location: str, genres: List[str] = None) -> List[ActivityItem]:
-        sample_movies = [
-            ActivityItem(name="Cineplex: Cosmic Adventure", category="movie", cost=14, duration=145,
-                attributes=ActivityAttributes(genres=["sci-fi", "action", "adventure"], vibes=["entertaining", "social"],
-                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True, indoor_outdoor="indoor",
-                    booking_required=True, popularity_score=0.85, rating=4.2)),
-            ActivityItem(name="Cineplex: Love in Paris", category="movie", cost=14, duration=130,
-                attributes=ActivityAttributes(genres=["romance", "drama"], vibes=["romantic", "social"],
-                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True, indoor_outdoor="indoor",
-                    booking_required=True, popularity_score=0.75, rating=4.0)),
-            ActivityItem(name="Cineplex: Laugh Riot", category="movie", cost=14, duration=120,
-                attributes=ActivityAttributes(genres=["comedy"], vibes=["entertaining", "social"],
-                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True, indoor_outdoor="indoor",
-                    booking_required=True, popularity_score=0.80, rating=4.1)),
-            ActivityItem(name="IMAX: Into the Deep", category="movie", cost=22, duration=150,
-                attributes=ActivityAttributes(genres=["documentary", "adventure"], vibes=["educational", "social"],
-                    time_slots=["morning", "afternoon", "evening"], suitable_for_groups=True, indoor_outdoor="indoor",
-                    booking_required=True, popularity_score=0.70, rating=4.3)),
-            ActivityItem(name="Cineplex: Thriller Night", category="movie", cost=14, duration=135,
-                attributes=ActivityAttributes(genres=["thriller", "mystery"], vibes=["suspenseful", "social"],
-                    time_slots=["evening", "night"], suitable_for_groups=True, indoor_outdoor="indoor",
-                    booking_required=True, popularity_score=0.72, rating=3.9)),
-            ActivityItem(name="Cineplex: Family Fun", category="movie", cost=11, duration=100,
-                attributes=ActivityAttributes(genres=["animation", "family", "comedy"], vibes=["family_friendly", "entertaining"],
-                    time_slots=["morning", "afternoon", "evening"], suitable_for_groups=True, indoor_outdoor="indoor",
-                    booking_required=True, popularity_score=0.88, rating=4.4)),
-            ActivityItem(name="Cineplex: Action Blast", category="movie", cost=14, duration=140,
-                attributes=ActivityAttributes(genres=["action", "adventure"], vibes=["entertaining", "social"],
-                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True, indoor_outdoor="indoor",
-                    booking_required=True, popularity_score=0.82, rating=4.0)),
-            ActivityItem(name="Arthouse: Indie Dreams", category="movie", cost=10, duration=125,
-                attributes=ActivityAttributes(genres=["drama", "indie"], vibes=["cultural", "social"],
-                    time_slots=["afternoon", "evening"], suitable_for_groups=True, indoor_outdoor="indoor",
-                    booking_required=True, popularity_score=0.55, rating=4.5)),
-            ActivityItem(name="Cineplex: Horror Nights", category="movie", cost=14, duration=120,
-                attributes=ActivityAttributes(genres=["horror", "thriller"], vibes=["suspenseful", "social"],
-                    time_slots=["evening", "night", "late_night"], suitable_for_groups=True, indoor_outdoor="indoor",
-                    booking_required=True, popularity_score=0.68, rating=3.7)),
-            ActivityItem(name="Cineplex: The Epic Journey", category="movie", cost=16, duration=180,
-                attributes=ActivityAttributes(genres=["action", "adventure", "fantasy"], vibes=["entertaining", "social"],
-                    time_slots=["afternoon", "evening"], suitable_for_groups=True, indoor_outdoor="indoor",
-                    booking_required=True, popularity_score=0.90, rating=4.6)),
+        movie_pool = [
+            ("Cinema: Galactic Odyssey", ["sci-fi", "action", "adventure"], 450),
+            ("Cinema: Whispers of the Heart", ["romance", "drama"], 420),
+            ("Cinema: The Parallel Universe", ["sci-fi", "thriller", "mystery"], 480),
+            ("Cinema: Midnight Masquerade", ["mystery", "thriller"], 440),
+            ("Cinema: Neon City Nights", ["action", "thriller"], 460),
+            ("Cinema: The Last Waltz", ["drama", "romance"], 400),
+            ("Cinema: Cosmic Convergence", ["sci-fi", "mystery"], 470),
+            ("Cinema: Laughter Unlimited", ["comedy"], 380),
+            ("Cinema: The Silent Echo", ["drama", "mystery"], 410),
+            ("Cinema: Skyward Bound", ["animation", "adventure", "family"], 350),
         ]
+        
+        sample_movies = []
+        for name, m_genres, cost in movie_pool:
+            sample_movies.append(ActivityItem(
+                name=name,
+                category="movie",
+                cost=cost,
+                duration=145,
+                attributes=ActivityAttributes(
+                    genres=m_genres,
+                    vibes=["social", "entertaining"],
+                    time_slots=["afternoon", "evening", "night"],
+                    suitable_for_groups=True,
+                    booking_required=True,
+                    popularity_score=0.82,
+                    rating=4.3
+                ),
+                source="sample"
+            ))
+            
         if genres:
-            sample_movies = [m for m in sample_movies 
-                           if any(g in m.attributes.genres for g in genres)]
+            filtered = [m for m in sample_movies if any(g in m.attributes.genres for g in genres)]
+            if filtered:
+                sample_movies = filtered
+                
         for m in sample_movies:
-            m.cost = 450 if m.cost < 15 else 800
-            m.lat = 0.001 * random.uniform(-20, 20)
-            m.lon = 0.001 * random.uniform(-20, 20)
+            m.lat = 0.005 * random.uniform(-1, 1)
+            m.lon = 0.005 * random.uniform(-1, 1)
+            
         return sample_movies
     
     def _get_sample_restaurants(self, location: str, cuisines: List[str] = None,
@@ -731,64 +1281,104 @@ class WebDataFetcher:
         sample_restaurants = [
             ActivityItem(name="The Royal Indian Kitchen", category="dining", cost=18, duration=65,
                 attributes=ActivityAttributes(cuisines=["indian", "north_indian"], vibes=["social", "luxurious"],
-                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True, indoor_outdoor="indoor",
+                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True,
                     popularity_score=0.82, rating=4.3)),
             ActivityItem(name="Dragon Palace Chinese", category="dining", cost=16, duration=55,
                 attributes=ActivityAttributes(cuisines=["chinese"], vibes=["social", "family_friendly"],
-                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True, indoor_outdoor="indoor",
+                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True,
                     popularity_score=0.75, rating=4.1)),
             ActivityItem(name="Pasta Paradise Italian", category="dining", cost=20, duration=60,
                 attributes=ActivityAttributes(cuisines=["italian"], vibes=["romantic", "social"],
-                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True, indoor_outdoor="indoor",
+                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True,
                     popularity_score=0.78, rating=4.2)),
             ActivityItem(name="Taco Fiesta Mexican", category="dining", cost=14, duration=50,
                 attributes=ActivityAttributes(cuisines=["mexican"], vibes=["social", "family_friendly"],
-                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True, indoor_outdoor="indoor",
+                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True,
                     popularity_score=0.70, rating=4.0)),
             ActivityItem(name="Thai Orchid Garden", category="dining", cost=17, duration=55,
                 attributes=ActivityAttributes(cuisines=["thai"], vibes=["social", "cultural"],
-                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True, indoor_outdoor="indoor",
+                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True,
                     popularity_score=0.72, rating=4.1)),
             ActivityItem(name="Sushi Master Japanese", category="dining", cost=25, duration=60,
                 attributes=ActivityAttributes(cuisines=["japanese"], vibes=["luxurious", "social"],
-                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True, indoor_outdoor="indoor",
+                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True,
                     popularity_score=0.85, rating=4.5)),
             ActivityItem(name="Dosa Plaza South Indian", category="dining", cost=8, duration=40,
                 attributes=ActivityAttributes(cuisines=["south_indian", "vegetarian"], vibes=["budget_friendly", "family_friendly"],
-                    time_slots=["morning", "afternoon", "evening"], suitable_for_groups=True, indoor_outdoor="indoor",
+                    time_slots=["morning", "afternoon", "evening"], suitable_for_groups=True,
                     popularity_score=0.80, rating=4.2)),
             ActivityItem(name="BBQ Nation Grill House", category="dining", cost=22, duration=90,
                 attributes=ActivityAttributes(cuisines=["american", "indian"], vibes=["social", "family_friendly"],
-                    time_slots=["evening", "night"], suitable_for_groups=True, indoor_outdoor="indoor",
+                    time_slots=["evening", "night"], suitable_for_groups=True,
                     popularity_score=0.88, rating=4.4)),
             ActivityItem(name="Green Bowl Vegan Cafe", category="dining", cost=15, duration=45,
                 attributes=ActivityAttributes(cuisines=["vegan", "vegetarian", "mediterranean"], vibes=["budget_friendly", "social"],
-                    time_slots=["morning", "afternoon", "evening"], suitable_for_groups=True, indoor_outdoor="indoor",
+                    time_slots=["morning", "afternoon", "evening"], suitable_for_groups=True,
                     popularity_score=0.65, rating=4.3)),
             ActivityItem(name="Chai & Snacks Corner", category="dining", cost=4, duration=30,
                 attributes=ActivityAttributes(cuisines=["indian"], vibes=["budget_friendly", "social"],
-                    time_slots=["morning", "afternoon", "evening"], suitable_for_groups=True, indoor_outdoor="indoor",
+                    time_slots=["morning", "afternoon", "evening"], suitable_for_groups=True,
                     popularity_score=0.75, rating=4.0)),
             ActivityItem(name="Fine Dining at The Grand", category="dining", cost=50, duration=90,
                 attributes=ActivityAttributes(cuisines=["continental", "mediterranean"], vibes=["luxurious", "romantic"],
-                    time_slots=["evening", "night"], suitable_for_groups=True, indoor_outdoor="indoor",
+                    time_slots=["evening", "night"], suitable_for_groups=True,
                     popularity_score=0.92, rating=4.7)),
             ActivityItem(name="Korean BBQ House", category="dining", cost=20, duration=75,
                 attributes=ActivityAttributes(cuisines=["korean"], vibes=["social", "family_friendly"],
-                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True, indoor_outdoor="indoor",
+                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True,
                     popularity_score=0.78, rating=4.3)),
             ActivityItem(name="Free Community Kitchen", category="dining", cost=0, duration=40,
                 attributes=ActivityAttributes(cuisines=["indian", "vegetarian"], vibes=["budget_friendly", "cultural"],
-                    time_slots=["morning", "afternoon"], suitable_for_groups=True, indoor_outdoor="indoor",
+                    time_slots=["morning", "afternoon"], suitable_for_groups=True,
                     popularity_score=0.60, rating=4.0)),
             ActivityItem(name="Street Food Junction", category="dining", cost=5, duration=35,
-                attributes=ActivityAttributes(cuisines=["indian"], vibes=["budget_friendly", "social"],
-                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True, indoor_outdoor="outdoor",
+                attributes=ActivityAttributes(cuisines=["indian", "street_food"], vibes=["budget_friendly", "social"],
+                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True,
                     popularity_score=0.82, rating=4.1)),
             ActivityItem(name="Seafood Paradise", category="dining", cost=22, duration=60,
                 attributes=ActivityAttributes(cuisines=["seafood", "indian"], vibes=["social", "luxurious"],
-                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True, indoor_outdoor="indoor",
+                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True,
                     popularity_score=0.80, rating=4.4)),
+            ActivityItem(name="Al-Kabsa Mandi House", category="dining", cost=18, duration=75,
+                attributes=ActivityAttributes(cuisines=["mandi", "mughlai"], vibes=["social", "cultural", "luxurious"],
+                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True,
+                    popularity_score=0.91, rating=4.7)),
+            ActivityItem(name="Biryani Darbar", category="dining", cost=14, duration=55,
+                attributes=ActivityAttributes(cuisines=["biryani", "north_indian", "mughlai"], vibes=["social", "budget_friendly"],
+                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True,
+                    popularity_score=0.93, rating=4.6)),
+            ActivityItem(name="Hyderabadi Biryani House", category="dining", cost=12, duration=50,
+                attributes=ActivityAttributes(cuisines=["biryani", "south_indian"], vibes=["budget_friendly", "social"],
+                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True,
+                    popularity_score=0.89, rating=4.5)),
+            ActivityItem(name="Haleem & More", category="dining", cost=8, duration=40,
+                attributes=ActivityAttributes(cuisines=["mughlai", "north_indian"], vibes=["budget_friendly", "cultural"],
+                    time_slots=["afternoon", "evening"], suitable_for_groups=True,
+                    popularity_score=0.80, rating=4.3)),
+            ActivityItem(name="Chettinad Spice Garden", category="dining", cost=16, duration=60,
+                attributes=ActivityAttributes(cuisines=["south_indian", "indian"], vibes=["cultural", "social"],
+                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True,
+                    popularity_score=0.77, rating=4.4)),
+            ActivityItem(name="Pav Bhaji Street Corner", category="dining", cost=3, duration=25,
+                attributes=ActivityAttributes(cuisines=["street_food", "indian"], vibes=["budget_friendly", "social", "playful"],
+                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True,
+                    popularity_score=0.85, rating=4.2)),
+            ActivityItem(name="Irani Café & Bun Maska", category="dining", cost=4, duration=30,
+                attributes=ActivityAttributes(cuisines=["irani", "bakery"], vibes=["chill", "cultural", "budget_friendly"],
+                    time_slots=["morning", "afternoon", "evening"], suitable_for_groups=True,
+                    popularity_score=0.82, rating=4.5)),
+            ActivityItem(name="Filter Coffee & Idli House", category="dining", cost=4, duration=30,
+                attributes=ActivityAttributes(cuisines=["south_indian", "indian"], vibes=["budget_friendly", "chill"],
+                    time_slots=["morning", "afternoon"], suitable_for_groups=True,
+                    popularity_score=0.88, rating=4.3)),
+            ActivityItem(name="Waffles & Crepes Café", category="dining", cost=9, duration=40,
+                attributes=ActivityAttributes(cuisines=["desserts", "bakery"], vibes=["social", "romantic", "playful"],
+                    time_slots=["morning", "afternoon", "evening"], suitable_for_groups=True,
+                    popularity_score=0.78, rating=4.4)),
+            ActivityItem(name="Mughlai Darbar", category="dining", cost=20, duration=70,
+                attributes=ActivityAttributes(cuisines=["mughlai", "north_indian"], vibes=["luxurious", "cultural"],
+                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True,
+                    popularity_score=0.83, rating=4.5)),
         ]
         if cuisines:
             sample_restaurants = [r for r in sample_restaurants 
@@ -807,44 +1397,84 @@ class WebDataFetcher:
         sample_events = [
             ActivityItem(name="Live Music Night at Blue Note", category="entertainment", cost=15, duration=120,
                 attributes=ActivityAttributes(genres=["music"], vibes=["social", "entertaining"],
-                    time_slots=["evening", "night"], suitable_for_groups=True, indoor_outdoor="indoor",
+                    time_slots=["evening", "night"], suitable_for_groups=True,
                     booking_required=True, popularity_score=0.85, rating=4.5)),
             ActivityItem(name="Comedy Night - Stand Up Special", category="entertainment", cost=18, duration=90,
                 attributes=ActivityAttributes(genres=["comedy"], vibes=["entertaining", "social"],
-                    time_slots=["evening", "night"], suitable_for_groups=True, indoor_outdoor="indoor",
+                    time_slots=["evening", "night"], suitable_for_groups=True,
                     booking_required=True, popularity_score=0.80, rating=4.3)),
             ActivityItem(name="Art Gallery Exhibition Opening", category="cultural", cost=10, duration=90,
                 attributes=ActivityAttributes(vibes=["cultural", "social"],
-                    time_slots=["afternoon", "evening"], suitable_for_groups=True, indoor_outdoor="indoor",
+                    time_slots=["afternoon", "evening"], suitable_for_groups=True,
                     popularity_score=0.65, rating=4.2)),
-            ActivityItem(name="Escape Room Adventure", category="entertainment", cost=24, duration=70,
-                attributes=ActivityAttributes(vibes=["adventurous", "social"],
-                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True, indoor_outdoor="indoor",
-                    booking_required=True, popularity_score=0.88, rating=4.6)),
-            ActivityItem(name="Bowling Night at Strike Zone", category="entertainment", cost=16, duration=90,
-                attributes=ActivityAttributes(vibes=["social", "family_friendly"],
-                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True, indoor_outdoor="indoor",
+            ActivityItem(name="Escape Room — The Lost Temple", category="entertainment", cost=24, duration=70,
+                attributes=ActivityAttributes(vibes=["adventurous", "social", "competitive"],
+                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True,
+                    booking_required=True, popularity_score=0.91, rating=4.7)),
+            ActivityItem(name="Bowling at Strike Zone", category="entertainment", cost=16, duration=90,
+                attributes=ActivityAttributes(vibes=["social", "family_friendly", "competitive"],
+                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True,
                     popularity_score=0.82, rating=4.1)),
             ActivityItem(name="Jazz Lounge Evening", category="entertainment", cost=20, duration=120,
                 attributes=ActivityAttributes(genres=["music"], vibes=["relaxing", "romantic"],
-                    time_slots=["evening", "night"], suitable_for_groups=True, indoor_outdoor="indoor",
+                    time_slots=["evening", "night"], suitable_for_groups=True,
                     booking_required=True, popularity_score=0.75, rating=4.4)),
             ActivityItem(name="Free Outdoor Concert", category="entertainment", cost=0, duration=150,
                 attributes=ActivityAttributes(genres=["music"], vibes=["social", "budget_friendly"],
-                    time_slots=["evening"], suitable_for_groups=True, indoor_outdoor="outdoor",
+                    time_slots=["evening"], suitable_for_groups=True,
                     popularity_score=0.90, rating=4.3)),
             ActivityItem(name="Theatre Play - The Last Act", category="cultural", cost=25, duration=150,
                 attributes=ActivityAttributes(genres=["drama"], vibes=["cultural", "social"],
-                    time_slots=["evening"], suitable_for_groups=True, indoor_outdoor="indoor",
+                    time_slots=["evening"], suitable_for_groups=True,
                     booking_required=True, popularity_score=0.70, rating=4.5)),
-            ActivityItem(name="Karaoke Night", category="entertainment", cost=12, duration=120,
-                attributes=ActivityAttributes(vibes=["social", "entertaining"],
-                    time_slots=["evening", "night"], suitable_for_groups=True, indoor_outdoor="indoor",
-                    popularity_score=0.78, rating=4.0)),
+            ActivityItem(name="Karaoke Night — Sing Your Heart Out", category="entertainment", cost=12, duration=120,
+                attributes=ActivityAttributes(vibes=["social", "playful", "entertaining"],
+                    time_slots=["evening", "night"], suitable_for_groups=True,
+                    popularity_score=0.83, rating=4.2)),
             ActivityItem(name="Museum Special Exhibition", category="cultural", cost=12, duration=120,
-                attributes=ActivityAttributes(vibes=["cultural", "educational"],
-                    time_slots=["morning", "afternoon"], suitable_for_groups=True, indoor_outdoor="indoor",
+                attributes=ActivityAttributes(vibes=["cultural", "social"],
+                    time_slots=["morning", "afternoon"], suitable_for_groups=True,
                     popularity_score=0.68, rating=4.4)),
+            ActivityItem(name="Timezone Arcade & Gaming Zone", category="entertainment", cost=18, duration=90,
+                attributes=ActivityAttributes(vibes=["social", "playful", "competitive", "thrilling"],
+                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True,
+                    popularity_score=0.90, rating=4.5)),
+            ActivityItem(name="VR World — Virtual Reality Hub", category="entertainment", cost=22, duration=60,
+                attributes=ActivityAttributes(vibes=["thrilling", "social", "adventurous"],
+                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True,
+                    booking_required=True, popularity_score=0.88, rating=4.6)),
+            ActivityItem(name="Go-Kart Racing Track", category="entertainment", cost=20, duration=60,
+                attributes=ActivityAttributes(vibes=["thrilling", "competitive", "adventurous", "social"],
+                    time_slots=["afternoon", "evening"], suitable_for_groups=True,
+                    booking_required=True, popularity_score=0.92, rating=4.7)),
+            ActivityItem(name="Laser Tag Arena — Neon Zone", category="entertainment", cost=15, duration=45,
+                attributes=ActivityAttributes(vibes=["thrilling", "competitive", "social"],
+                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True,
+                    booking_required=True, popularity_score=0.87, rating=4.5)),
+            ActivityItem(name="Trampoline Park — Sky Jump", category="entertainment", cost=18, duration=60,
+                attributes=ActivityAttributes(vibes=["active", "thrilling", "playful", "social"],
+                    time_slots=["afternoon", "evening"], suitable_for_groups=True,
+                    popularity_score=0.85, rating=4.4)),
+            ActivityItem(name="Billiards & Snooker Club", category="entertainment", cost=10, duration=90,
+                attributes=ActivityAttributes(vibes=["chill", "social", "competitive"],
+                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True,
+                    popularity_score=0.76, rating=4.1)),
+            ActivityItem(name="Gaming Café — LAN Party Zone", category="entertainment", cost=12, duration=120,
+                attributes=ActivityAttributes(vibes=["social", "playful", "competitive"],
+                    time_slots=["afternoon", "evening", "night"], suitable_for_groups=True,
+                    popularity_score=0.80, rating=4.2)),
+            ActivityItem(name="Indoor Rock Climbing Wall", category="entertainment", cost=20, duration=90,
+                attributes=ActivityAttributes(vibes=["adventurous", "active", "thrilling"],
+                    time_slots=["morning", "afternoon", "evening"], suitable_for_groups=True,
+                    popularity_score=0.82, rating=4.5)),
+            ActivityItem(name="Badminton & Sports Complex", category="entertainment", cost=8, duration=60,
+                attributes=ActivityAttributes(vibes=["active", "social", "competitive"],
+                    time_slots=["morning", "afternoon", "evening"], suitable_for_groups=True,
+                    popularity_score=0.78, rating=4.0)),
+            ActivityItem(name="Mini Golf Adventure Park", category="entertainment", cost=14, duration=75,
+                attributes=ActivityAttributes(vibes=["social", "family_friendly", "playful"],
+                    time_slots=["afternoon", "evening"], suitable_for_groups=True,
+                    popularity_score=0.81, rating=4.3)),
         ]
         for e in sample_events:
             if e.cost <= 5: e.cost = 0
@@ -859,57 +1489,57 @@ class WebDataFetcher:
         sample_relaxed = [
             ActivityItem(name="Central Park Stroll", category="outdoor_relaxed", cost=0, duration=90,
                 attributes=ActivityAttributes(vibes=["relaxing", "budget_friendly"],
-                    time_slots=["morning", "afternoon", "evening"], suitable_for_groups=True, indoor_outdoor="outdoor",
+                    time_slots=["morning", "afternoon", "evening"], suitable_for_groups=True,
                     popularity_score=0.85, rating=4.5)),
             ActivityItem(name="Botanical Garden Visit", category="outdoor_relaxed", cost=5, duration=90,
                 attributes=ActivityAttributes(vibes=["relaxing", "cultural"],
-                    time_slots=["morning", "afternoon"], suitable_for_groups=True, indoor_outdoor="outdoor",
+                    time_slots=["morning", "afternoon"], suitable_for_groups=True,
                     popularity_score=0.75, rating=4.3)),
             ActivityItem(name="Sunset Beach Walk", category="outdoor_relaxed", cost=0, duration=60,
                 attributes=ActivityAttributes(vibes=["relaxing", "romantic"],
-                    time_slots=["evening"], suitable_for_groups=True, indoor_outdoor="outdoor",
+                    time_slots=["evening"], suitable_for_groups=True,
                     popularity_score=0.90, rating=4.7)),
             ActivityItem(name="Lake Viewpoint Picnic", category="outdoor_relaxed", cost=0, duration=120,
                 attributes=ActivityAttributes(vibes=["relaxing", "family_friendly"],
-                    time_slots=["morning", "afternoon"], suitable_for_groups=True, indoor_outdoor="outdoor",
+                    time_slots=["morning", "afternoon"], suitable_for_groups=True,
                     popularity_score=0.80, rating=4.4)),
             ActivityItem(name="Heritage Walking Trail", category="outdoor_relaxed", cost=0, duration=90,
                 attributes=ActivityAttributes(vibes=["cultural", "budget_friendly"],
-                    time_slots=["morning", "afternoon"], suitable_for_groups=True, indoor_outdoor="outdoor",
+                    time_slots=["morning", "afternoon"], suitable_for_groups=True,
                     popularity_score=0.70, rating=4.2)),
         ]
         sample_active = [
             ActivityItem(name="Adventure Trek Base Camp", category="outdoor_active", cost=25, duration=180,
                 attributes=ActivityAttributes(vibes=["adventurous", "active"],
-                    time_slots=["morning"], suitable_for_groups=True, indoor_outdoor="outdoor",
+                    time_slots=["morning"], suitable_for_groups=True,
                     popularity_score=0.82, rating=4.5)),
             ActivityItem(name="Rock Climbing Center", category="outdoor_active", cost=28, duration=120,
                 attributes=ActivityAttributes(vibes=["adventurous", "active"],
-                    time_slots=["morning", "afternoon", "evening"], suitable_for_groups=True, indoor_outdoor="outdoor",
+                    time_slots=["morning", "afternoon", "evening"], suitable_for_groups=True,
                     popularity_score=0.78, rating=4.3)),
             ActivityItem(name="Kayaking & Water Sports", category="outdoor_active", cost=22, duration=120,
                 attributes=ActivityAttributes(vibes=["adventurous", "active"],
-                    time_slots=["morning", "afternoon"], suitable_for_groups=True, indoor_outdoor="outdoor",
+                    time_slots=["morning", "afternoon"], suitable_for_groups=True,
                     popularity_score=0.85, rating=4.6)),
             ActivityItem(name="Go-Kart Racing Arena", category="outdoor_active", cost=20, duration=60,
                 attributes=ActivityAttributes(vibes=["adventurous", "social"],
-                    time_slots=["afternoon", "evening"], suitable_for_groups=True, indoor_outdoor="outdoor",
+                    time_slots=["afternoon", "evening"], suitable_for_groups=True,
                     popularity_score=0.88, rating=4.4)),
             ActivityItem(name="Cycling Trail Adventure", category="outdoor_active", cost=10, duration=120,
                 attributes=ActivityAttributes(vibes=["active", "budget_friendly"],
-                    time_slots=["morning", "afternoon"], suitable_for_groups=True, indoor_outdoor="outdoor",
+                    time_slots=["morning", "afternoon"], suitable_for_groups=True,
                     popularity_score=0.75, rating=4.2)),
             ActivityItem(name="Paintball Combat Zone", category="outdoor_active", cost=28, duration=90,
                 attributes=ActivityAttributes(vibes=["adventurous", "social"],
-                    time_slots=["morning", "afternoon"], suitable_for_groups=True, indoor_outdoor="outdoor",
+                    time_slots=["morning", "afternoon"], suitable_for_groups=True,
                     popularity_score=0.80, rating=4.3)),
             ActivityItem(name="Horseback Riding Stables", category="outdoor_active", cost=35, duration=90,
                 attributes=ActivityAttributes(vibes=["adventurous", "relaxing"],
-                    time_slots=["morning", "afternoon"], suitable_for_groups=True, indoor_outdoor="outdoor",
+                    time_slots=["morning", "afternoon"], suitable_for_groups=True,
                     popularity_score=0.72, rating=4.4)),
             ActivityItem(name="Public Sports Ground", category="outdoor_active", cost=0, duration=90,
                 attributes=ActivityAttributes(vibes=["active", "budget_friendly"],
-                    time_slots=["morning", "afternoon", "evening"], suitable_for_groups=True, indoor_outdoor="outdoor",
+                    time_slots=["morning", "afternoon", "evening"], suitable_for_groups=True,
                     popularity_score=0.85, rating=4.1)),
         ]
         for o in sample_relaxed + sample_active:
@@ -1039,11 +1669,12 @@ class GroupPreferenceAggregator:
         cuisine_votes = defaultdict(int)
         vibe_votes = defaultdict(int)
         budget_votes = defaultdict(int)
-        indoor_outdoor_votes = defaultdict(int)
         time_slot_votes = defaultdict(int)
         dietary_votes = defaultdict(int)
         energy_levels = []
         exploration_factors = []
+        vetoes = {"genres": set(), "cuisines": set(), "categories": set()}
+        
         for pref in member_preferences:
             for g in pref.get("genres", []):
                 genre_votes[g.lower().replace("-", "")] += 1
@@ -1051,10 +1682,15 @@ class GroupPreferenceAggregator:
                 cuisine_votes[c.lower().replace(" ", "_")] += 1
             for v in pref.get("vibes", []):
                 vibe_votes[v.lower().replace("-", "_")] += 1
+                
+            for g in pref.get("disliked_genres", []):
+                vetoes["genres"].add(g.lower().replace("-", ""))
+            for c in pref.get("disliked_cuisines", []):
+                vetoes["cuisines"].add(c.lower().replace(" ", "_"))
+            for cat in pref.get("disliked_categories", []):
+                vetoes["categories"].add(cat.lower())
             budget = pref.get("budget_range", "medium")
             budget_votes[budget] += 1
-            io = pref.get("indoor_outdoor", "both")
-            indoor_outdoor_votes[io] += 1
             for t in pref.get("preferred_time_slots", []):
                 time_slot_votes[t.lower()] += 1
             for d in pref.get("dietary_restrictions", []):
@@ -1078,10 +1714,6 @@ class GroupPreferenceAggregator:
                 budget_idx = min(budget_idx, idx)
                 break
         budget = budget_order[budget_idx]
-        io_sorted = sorted(indoor_outdoor_votes.items(), key=lambda x: x[1], reverse=True)
-        indoor_outdoor = io_sorted[0][0] if io_sorted else "both"
-        if io_sorted and io_sorted[0][1] < n_members / 2:
-            indoor_outdoor = "both"
         avg_energy = sum(energy_levels) / len(energy_levels) if energy_levels else 3
         avg_exploration = sum(exploration_factors) / len(exploration_factors) if exploration_factors else 1.5
         dietary = list(dietary_votes.keys())
@@ -1104,21 +1736,22 @@ class GroupPreferenceAggregator:
         cuisine_scores = compute_borda(cuisine_pref_list, set())
         vibe_scores = compute_borda(vibe_pref_list, set())
         time_scores = compute_borda(time_pref_list, set())
-        res_genres = top_borda(genre_scores, 5)
-        res_cuisines = top_borda(cuisine_scores, 5)
+        res_genres = [g for g in top_borda(genre_scores, 5) if g not in vetoes["genres"]]
+        res_cuisines = [c for c in top_borda(cuisine_scores, 5) if c not in vetoes["cuisines"]]
         res_vibes = top_borda(vibe_scores, 3)
         res_times = top_borda(time_scores, 2) or ["afternoon", "evening"]
+        
         return {
             "genres": res_genres,
             "cuisines": res_cuisines,
             "vibes": res_vibes,
             "budget_range": budget,
-            "indoor_outdoor": indoor_outdoor,
             "preferred_time_slots": res_times,
             "dietary_restrictions": dietary,
             "exploration_factor": avg_exploration,
             "energy_level": round(avg_energy, 1),
             "member_count": n_members,
+            "vetoes": {k: list(v) for k, v in vetoes.items()}
         }
 
 class ThompsonSamplingArm:
@@ -1248,7 +1881,6 @@ class ContextualThompsonEngine:
         b_map = {"free": 0.0, "low": 0.25, "medium": 0.5, "high": 1.0}
         b = b_map.get(context.get("budget", "medium"), 0.5)
         h = int(context.get("time_minutes", 720)) // 60
-        pref = context.get("indoor_outdoor", "both")
         ws = float(context.get("weather_score", 0.7))
         gs = min(int(context.get("group_size", 2)), 10) / 10.0
         dp = float(context.get("day_progress", 0.5))
@@ -1273,8 +1905,6 @@ class ContextualThompsonEngine:
             cuisine_match,
             vibe_match,
             time_match,
-            1.0 if pref in ("outdoor", "both") else 0.0,
-            1.0 if pref in ("indoor", "both") else 0.0,
             1.0 if 5 <= h < 12 else 0.0,
             1.0 if 12 <= h < 17 else 0.0,
             1.0 if 17 <= h < 21 else 0.0,
@@ -1283,6 +1913,8 @@ class ContextualThompsonEngine:
             1.0 if 12 <= h < 17 else 0.0,
             1.0 if 17 <= h < 21 else 0.0,
             1.0,
+            0.0,
+            0.0,
         ], dtype=np.float64)
 
 class GeoEngine:
@@ -1358,7 +1990,7 @@ class ItineraryBuilder:
     def _travel_time(self, dist_km: float) -> int:
         if dist_km <= 0.1:
             return 0
-        return max(5, int((dist_km / TRAVEL_SPEED_KMH) * 60))
+        return max(5, int((dist_km / TRAVEL_SPEED_KMH) * 60) + 5)
     
     def _get_time_slot(self, minutes: int) -> str:
         h = minutes // 60
@@ -1371,6 +2003,14 @@ class ItineraryBuilder:
         else:
             return "night"
     
+    def _is_similar(self, name1: str, name2: str) -> bool:
+        s1 = re.sub(r'[^a-zA-Z0-0]', '', name1.lower())
+        s2 = re.sub(r'[^a-zA-Z0-9]', '', name2.lower())
+        if s1 == s2: return True
+        if s1 in s2 or s2 in s1:
+            if abs(len(s1) - len(s2)) < 5: return True
+        return False
+
     def build(
         self,
         pool: Dict[str, List[ActivityItem]],
@@ -1380,12 +2020,18 @@ class ItineraryBuilder:
         centroid: Tuple[float, float],
         group_prefs: Dict,
         exclusion_set: set,
+        adjustment_context: str = "",
+        category_bias: Optional[Dict[str, float]] = None
     ) -> List[Dict]:
-        max_spend = float(MAX_BUDGET_MAP.get(context.get("budget", "medium"), 1500))
+        category_bias = category_bias or {}
+        base_budget = float(MAX_BUDGET_MAP.get(context.get("budget", "medium"), 1500))
+        member_count = group_prefs.get("member_count", 1)
+        max_spend = base_budget * member_count
+
         span = max(end_min - start_min, 1)
         
         logger.info(
-            f"[ItineraryBuilder] Building for {start_min}-{end_min}, budget={max_spend}"
+            f"[ItineraryBuilder] Building for {start_min}-{end_min}, group_size={member_count}, total_budget={max_spend}"
         )
 
         root = BeamNode(
@@ -1430,16 +2076,32 @@ class ItineraryBuilder:
                 for category, items in pool.items():
                     if not items: continue
 
+                    vetoes = group_prefs.get("vetoes", {})
+                    if category.lower() in [v.lower() for v in vetoes.get("categories", [])]:
+                        continue
+
                     div_count = node.diversity.get(category, 0)
-                    diversity_penalty = (div_count**2) * 2.0
+                    diversity_penalty = (div_count**2) * 4.0
                     
                     if node.schedule and node.schedule[-1]["category"] == category:
-                        diversity_penalty += 10.0
+                        continue
+                    
+                    is_solo = group_prefs.get("member_count", 1) <= 1
                     
                     for item in items:
+                        if any(self._is_similar(item.name, prev["venue"]) for prev in node.schedule):
+                            continue
                         if item.name in node.exclusion: continue
+                        
+                        if is_solo and item.attributes.solo_score < 0.4:
+                            continue
+                        
+                        if any(g.lower() in [v.lower() for v in vetoes.get("genres", [])] for g in item.attributes.genres):
+                            continue
+                        if any(c.lower() in [v.lower() for v in vetoes.get("cuisines", [])] for c in item.attributes.cuisines):
+                            continue
 
-                        if max_spend > 0 and node.spent + item.cost > max_spend * 1.15:
+                        if max_spend > 0 and node.spent + item.cost > max_spend:
                             continue
 
                         lat = item.lat if item.lat != 0.0 else centroid[0]
@@ -1452,54 +2114,133 @@ class ItineraryBuilder:
 
                         base_score = self.bandit.score_item(item, time_context, group_prefs)
 
-                        dist_penalty = dist / 15.0
+                        dist_penalty = (dist / 12.0) ** 1.2
+                        
+                        target_energy_level = group_prefs.get("energy_level", 3.0)
+                        item_energy_str = item.attributes.energy_profile
 
+                        e_map = {"low": 1.0, "medium": 3.0, "high": 5.0}
+                        item_energy_val = e_map.get(item_energy_str, 3.0)
+
+                        if dp < 0.3:
+                            ideal_flow_val = 2.0
+                        elif dp > 0.7:
+                            ideal_flow_val = 1.5
+                        else:
+                            ideal_flow_val = target_energy_level
+
+                        energy_match = 1.0 - abs(ideal_flow_val - item_energy_val) / 5.0
+                        
                         budget_tier = context.get("budget", "medium")
                         if budget_tier in ["medium", "high"]:
-                            cost_score = (item.cost / max_spend) * 0.5
+                            cost_score = (item.cost / max_spend) * 0.3
                         else:
-                            cost_score = -(item.cost / (max_spend + 1)) * 0.5
+                            cost_score = -(item.cost / (max_spend + 1)) * 0.7
+                        
+                        solo_bonus = (item.attributes.solo_score * 4.0) if is_solo else 0.0
 
                         time_match = self.matcher.compute_time_match(time_slot, item.attributes.time_slots)
+
+                        breather_penalty = 0.0
+                        if node.schedule and node.schedule[-1].get("energy_profile") == "high" and item_energy_str == "high":
+                            breather_penalty = 10.0
+                            logger.debug(f"[Engine] Applying breather penalty for {item.name}")
+                        
+                        meal_window_penalty = 0.0
+                        arrival_h_float = (node.current_time + travel) / 60.0
+                        if category != "dining":
+                            if 12.5 <= arrival_h_float <= 13.5:
+                                meal_window_penalty = 15.0
+                            elif 19.8 <= arrival_h_float <= 21.0:
+                                meal_window_penalty = 20.0
 
                         seq_bonus = 0.0
                         if category == "dining":
                             if node.schedule and node.schedule[-1]["category"] != "dining":
-                                seq_bonus += 1.0
+                                seq_bonus += 2.0
                             arrival_h = (node.current_time + travel) // 60
-                            if 12 <= arrival_h <= 14:
-                                if time_since_meal > 180:
-                                    seq_bonus += 15.0
-                            elif 19 <= arrival_h <= 21:
-                                if time_since_meal > 240:
-                                    seq_bonus += 15.0
-                            elif time_since_meal > 240:
-                                seq_bonus += 3.0
+                            if 11 <= arrival_h <= 14:
+                                if time_since_meal > 150:
+                                    seq_bonus += 20.0
+                            elif 18 <= arrival_h <= 21:
+                                if time_since_meal > 200:
+                                    seq_bonus += 25.0
+                            elif time_since_meal > 300:
+                                seq_bonus += 5.0
                         
-                        total_score = base_score + seq_bonus + cost_score - dist_penalty - diversity_penalty
+                        adj_bonus = 0.0
+                        if adjustment_context:
+                            adj_lower = adjustment_context.lower()
+                            if ("movie" in adj_lower or "cinema" in adj_lower) and category == "movie":
+                                adj_bonus = 50.0
+                            elif ("eat" in adj_lower or "dine" in adj_lower) and category == "dining":
+                                adj_bonus = 10.0
+                        
+                        bias_multiplier = category_bias.get(category, 1.0)
+                        
+                        oscillation_penalty = 0.0
+                        if len(node.schedule) >= 3:
+                            recent_cats = [s["type"] for s in node.schedule[-3:]]
+                            if category in recent_cats:
+                                oscillation_penalty = 5.0
+
+                        total_score = ((base_score * bias_multiplier) * 0.3) + (seq_bonus * 0.4) + (energy_match * 0.3) + \
+                                     (cost_score * 0.1) - dist_penalty - (diversity_penalty * 0.8) - \
+                                     oscillation_penalty - breather_penalty - meal_window_penalty + \
+                                     adj_bonus + solo_bonus
 
                         if time_match < 0.3:
                             continue
 
-                        new_node = node.clone()
                         arrival = node.current_time + travel
+                        
+                        if category == "movie":
+                            valid_slots = item.attributes.exact_start_times if item.attributes.exact_start_times else [arrival]
+                            if not valid_slots or valid_slots[0] == arrival:
+                                movie_slots = [630, 810, 990, 1170, 1350]
+                                next_slot = next((s for s in movie_slots if s >= arrival), None)
+                            else:
+                                valid_slots = sorted(valid_slots)
+                                next_slot = next((s for s in valid_slots if s >= arrival), None)
+                                
+                            if not next_slot:
+                                continue
+                            wait_time = next_slot - arrival
+                            if wait_time > 120:
+                                continue
+                            total_score -= (wait_time * 0.4)
+                            arrival = next_slot
+
+                        new_node = node.clone()
                         departure = arrival + item.duration
                         
                         arrival_time_str = f"{arrival // 60:02d}:{arrival % 60:02d}"
                         departure_time_str = f"{departure // 60:02d}:{departure % 60:02d}"
-                        
+                        arrival_h_f = arrival / 60.0
+
+                        if travel > 0:
+                            travel_note = f"~{travel} min drive from previous stop"
+                        else:
+                            travel_note = "Same area — no travel needed"
+
+                        meal_label = get_meal_label(arrival_h_f) if category == "dining" else ""
+
                         entry = {
                             **item.to_dict(),
-                            "activity_name": item.name,
-                            "display_name": item.name,
+                            "activity": item.attributes.action_title if item.attributes.action_title else item.name,
+                            "venue": item.name,
+                            "type": category,
                             "arrival_time": arrival_time_str,
                             "departure_time": departure_time_str,
                             "time_slot_display": f"{arrival_time_str} - {departure_time_str}",
-                            "estimated_duration": item.duration,
+                            "duration_minutes": item.duration,
                             "estimated_cost": item.cost,
                             "distance_km": round(dist, 2),
                             "travel_time_min": travel,
-                            "score": total_score
+                            "travel_note": travel_note,
+                            "meal_label": meal_label,
+                            "score": total_score,
+                            "order": len(node.schedule) + 1
                         }
                         
                         new_node.schedule.append(entry)
@@ -1516,7 +2257,45 @@ class ItineraryBuilder:
                         found_step = True
 
                 if not found_step:
-                    final_itineraries.append(node)
+                    free_duration = min(60, end_min - node.current_time)
+                    if free_duration >= 20:
+                        ft_start = node.current_time
+                        ft_end = ft_start + free_duration
+                        ft_start_str = f"{ft_start // 60:02d}:{ft_start % 60:02d}"
+                        ft_end_str   = f"{ft_end // 60 :02d}:{ft_end % 60 :02d}"
+                        time_slot_label = self._get_time_slot(ft_start)
+                        suggestions = {
+                            "morning":   ["Window shopping", "Photography walk", "Grab a snack", "Explore the neighbourhood"],
+                            "afternoon": ["People watching at a café", "Browse a bookstore", "Street food hunt", "Take photos"],
+                            "evening":   ["Sunset walk", "Grab a chai", "Explore local market", "Chill at a viewpoint"],
+                            "night":     ["Night food walk", "Rooftop spotting", "Dessert hunt", "Explore the nightlife area"],
+                        }.get(time_slot_label, ["Explore freely", "Grab a snack", "Rest and recharge"])
+                        free_entry = {
+                            "activity": "Free Time — Explore on Your Own",
+                            "venue": "Open Area",
+                            "type": "free_time",
+                            "category": "free_time",
+                            "is_free_time": True,
+                            "arrival_time": ft_start_str,
+                            "departure_time": ft_end_str,
+                            "time_slot_display": f"{ft_start_str} - {ft_end_str}",
+                            "duration_minutes": free_duration,
+                            "estimated_cost": 0,
+                            "travel_time_min": 0,
+                            "travel_note": "",
+                            "meal_label": "",
+                            "distance_km": 0,
+                            "score": 0,
+                            "source": "system",
+                            "description": f"No perfect match found for this {free_duration}-min window. Use this time to explore freely or rest.",
+                            "suggestions": suggestions,
+                            "order": len(node.schedule) + 1
+                        }
+                        node.schedule.append(free_entry)
+                        node.current_time = ft_end
+                        new_candidates.append(node)
+                    else:
+                        final_itineraries.append(node)
 
             if not new_candidates:
                 break
@@ -1530,8 +2309,12 @@ class ItineraryBuilder:
         all_final = final_itineraries + beam
         best_overall = max(all_final, key=lambda x: x.score)
         
+        total_live = sum(1 for s in best_overall.schedule if s.get("source") not in ("sample",))
+        coverage = (total_live / len(best_overall.schedule)) * 100 if best_overall.schedule else 0
+        enjoyment_score = round(best_overall.score / (len(best_overall.schedule) or 1), 2)
+        
         logger.info(
-            f"[ItineraryBuilder] Best itinerary: {len(best_overall.schedule)} items, score={best_overall.score:.2f}"
+            f"[Engine] OVERHAUL COMPLETE: Enjoyment={enjoyment_score}, Live Coverage={coverage}% ({total_live}/{len(best_overall.schedule)})"
         )
         
         return best_overall.schedule
@@ -1569,6 +2352,9 @@ class HybridRecommendationEngine:
         self.web_fetcher = WebDataFetcher()
         self.pref_aggregator = GroupPreferenceAggregator()
         self._llm = None
+        self._generation_locks: Dict[str, asyncio.Lock] = {}
+        self._generation_cache: Dict[str, Tuple[Dict, float]] = {}
+        self._cache_ttl = 45.0
     
     async def initialize(self):
         try:
@@ -1639,64 +2425,91 @@ class HybridRecommendationEngine:
         self,
         lat: float,
         lon: float,
+        city: str,
         categories: List[str],
         group_prefs: Dict,
     ) -> Dict[str, List[ActivityItem]]:
         pool: Dict[str, List[ActivityItem]] = {cat: [] for cat in ACTIONS}
         
-        fetch_tasks = []
+        category_to_task = {}
         
         if "dining" in categories:
-            fetch_tasks.append(self.web_fetcher.search_restaurants(
+            category_to_task["dining"] = self.web_fetcher.search_restaurants(
                 lat, lon, group_prefs.get("cuisines", []), 
                 group_prefs.get("budget_range", "medium")
-            ))
+            )
         
         if "movie" in categories:
-            fetch_tasks.append(self.web_fetcher.search_movies(
-                lat, lon, group_prefs.get("genres", [])
-            ))
+            category_to_task["movie"] = self.web_fetcher.search_movies(
+                lat, lon, city, group_prefs.get("genres", [])
+            )
         
         if "entertainment" in categories:
-            fetch_tasks.append(self.web_fetcher.search_events(
+            category_to_task["entertainment"] = self.web_fetcher.search_events(
                 lat, lon, "entertainment"
-            ))
+            )
         
         if "cultural" in categories:
-            fetch_tasks.append(self.web_fetcher.search_events(
+            category_to_task["cultural"] = self.web_fetcher.search_events(
                 lat, lon, "cultural"
-            ))
+            )
         
         if "outdoor_relaxed" in categories:
-            fetch_tasks.append(self.web_fetcher.search_outdoor_activities(
+            category_to_task["outdoor_relaxed"] = self.web_fetcher.search_outdoor_activities(
                 lat, lon, "outdoor_relaxed", group_prefs.get("vibes", [])
-            ))
+            )
         
         if "outdoor_active" in categories:
-            fetch_tasks.append(self.web_fetcher.search_outdoor_activities(
+            category_to_task["outdoor_active"] = self.web_fetcher.search_outdoor_activities(
                 lat, lon, "outdoor_active", group_prefs.get("vibes", [])
-            ))
+            )
 
-        results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+        active_cats = list(category_to_task.keys())
+        tasks = [category_to_task[cat] for cat in active_cats]
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        idx = 0
-        for cat in ACTIONS:
-            if cat in categories and idx < len(results):
-                result = results[idx]
-                if isinstance(result, list) and len(result) > 0:
-                    pool[cat] = [item for item in result if item.source != "sample"]
-                    if not pool[cat]: 
-                         pool[cat] = result
-                elif isinstance(result, Exception) or (isinstance(result, list) and len(result) == 0):
-                    logger.warning(f"Fetch failed or empty for {cat}. Using sample data as fallback.")
-                    pool[cat] = self._get_sample_for_category(cat, group_prefs)
-                idx += 1
-            elif cat in categories:
-                pool[cat] = self._get_sample_for_category(cat, group_prefs)
+        cat_to_live_items = {}
+        for cat, result in zip(active_cats, results):
+            if isinstance(result, list) and len(result) > 0:
+                live_items = [item for item in result if item.source not in ("sample",)]
+                if live_items:
+                    cat_to_live_items[cat] = live_items
 
-        for cat, items in pool.items():
-            if items:
-                logger.info(f"[Pool] {cat}: {len(items)} items")
+        if not cat_to_live_items and len(categories) > 0:
+            logger.info("[Fetch] Zero live results. Triggering aggressive recovery scan...")
+            recovery_cat = categories[0]
+            recovery_items = await self.web_fetcher._search_selenium_fallback(recovery_cat, lat, lon)
+            if recovery_items:
+                cat_to_live_items[recovery_cat] = recovery_items
+        
+        has_any_live = len(cat_to_live_items) > 0
+
+        for cat in active_cats:
+            if has_any_live:
+                if cat in cat_to_live_items:
+                    items = cat_to_live_items[cat]
+                    for item in items:
+                        item.source = "live"
+                    pool[cat] = items
+                    logger.info(f"[Fetch] {cat}: {len(items)} LIVE items fetched.")
+                else:
+                    pool[cat] = []
+                    logger.warning(f"[Fetch] {cat}: No live data. Skipping to ensure 100% live itinerary.")
+            else:
+                samples = self._get_sample_for_category(cat, group_prefs)
+                for item in samples:
+                    item.source = "sample"
+                pool[cat] = samples
+                logger.warning(f"[Fetch] {cat}: No live data globally — using {len(samples)} sample items.")
+        
+        weather_score = group_prefs.get("weather_score", 0.7)
+        if weather_score < 0.4:
+            logger.info(f"[Engine] Poor weather ({weather_score:.2f}). Deprioritizing outdoor activities.")
+            if "outdoor_relaxed" in pool:
+                for item in pool["outdoor_relaxed"]: item.attributes.popularity_score *= 0.5
+            if "outdoor_active" in pool:
+                for item in pool["outdoor_active"]: item.attributes.popularity_score *= 0.3
         
         return pool
     
@@ -1715,75 +2528,246 @@ class HybridRecommendationEngine:
         else:
             return self.web_fetcher._get_sample_outdoor("local", category)
     
-    async def _llm_summary(
-        self, schedule: List[Dict], city: str, constraints: Dict, group_prefs: Dict
-    ) -> Tuple[str, str]:
+    async def _enrich_schedule_with_llm(
+        self, schedule: List[Dict], city: str, constraints: Dict, group_prefs: Dict, missing_cats: List[str] = None
+    ):
         if not schedule:
-            return (
-                "No activities could be scheduled. Try adjusting your time or preferences.",
-                "Insufficient data or constraints too tight to generate a valid itinerary."
-            )
+            return "", ""
 
-        llm = self._get_llm()
-        if not llm:
-            return self._generate_fallback_summary(schedule, city, group_prefs)
-        
-        lines = "\n".join(
-            f"{i+1}. {s['name']} ({s['type']}, {s['duration']}min, Rs.{s.get('estimated_cost', 0)})"
-            for i, s in enumerate(schedule[:14])
-        )
-
+        for s in schedule:
+            s["description"] = self._generate_core_description(s, city, group_prefs)
+            
         prompt = (
-            f"Given this group itinerary for {city}:\n{lines}\n"
-            f"Constraints: {json.dumps(constraints, default=str)}\n"
-            f"Group prefs: {json.dumps(group_prefs, default=str)}\n"
-            f"Return JSON with 'summary' (2-3 sentences, engaging) and 'reasoning' (why these choices)."
+            f"You are a local guide in {city}. Provide a warm, engaging summary of this itinerary and "
+            f"the logic behind why it's perfect for this group.\n"
+            f"Itinerary: " + ", ".join([s['venue'] for s in schedule]) + "\n"
+            "Return JSON: {'summary': 'paragraph', 'reasoning': 'paragraph'}"
         )
         
-        for i in range(3): 
+        models = ["z-ai/glm-4.5-air:free"]
+        key = os.environ.get("OPENROUTER_API_KEY", "")
+        async with httpx.AsyncClient() as client:
             try:
-                resp = await llm.chat.completions.create(
-                    model="z-ai/glm-4.5-air:free",
-                    messages=[{"role": "user", "content": prompt}],
-                    response_format={"type": "json_object"},
-                    timeout=15.0,
+                resp = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                    json={
+                        "model": models[0],
+                        "messages": [{"role": "user", "content": prompt}],
+                        "response_format": {"type": "json_object"}
+                    },
+                    timeout=20.0
                 )
-                data = json.loads(resp.choices[0].message.content)
-                return data.get("summary", ""), data.get("reasoning", "")
-            except Exception as exc:
-                if i < 2:
-                    await asyncio.sleep(1 + random.random())
-                else:
-                    logger.warning(f"LLM summary failed after 3 attempts: {exc}")
+                if resp.status_code == 200:
+                    data = json.loads(resp.json()["choices"][0]["message"]["content"])
+                    return data.get("summary", ""), data.get("reasoning", "")
+                elif resp.status_code == 429:
+                    logger.info("[LLM] OpenRouter rate limit reached (429). Jumping to fallback.")
+            except Exception as e:
+                logger.info(f"[LLM] Narrative generation (external limit/error): {e}")
         
         return self._generate_fallback_summary(schedule, city, group_prefs)
+        
+        logger.warning("[LLM] AI attempts failed — using fallback descriptions.")
+        fallbacks = [
+            "Experience the unique atmosphere and local charm of {venue} during this {type} activity.",
+            "Take some time to explore {venue}, a perfect spot for {type} in the heart of {city}.",
+            "Make the most of your day with a visit to {venue}, known for its {type} vibes.",
+            "A wonderful opportunity to enjoy {type} at {venue} with your group.",
+            "Discover what makes {venue} special as you enjoy this {type} session together.",
+            "Immerse yourselves in the {type} experience at the local favorite {venue}.",
+            "Get a true sense of the city's {type} scene with a tailored visit to {venue}.",
+            "Enjoy some quality time at {venue}, a top-rated destination for {type}."
+        ]
+        
+        for i, s in enumerate(schedule):
+            template = fallbacks[i % len(fallbacks)]
+            s["description"] = template.format(
+                venue=s['venue'], 
+                type=s['type'].replace('_', ' '),
+                city=city
+            )
+    
+    def _generate_core_description(self, item: Dict, city: str, group_prefs: Dict) -> str:
+        cat = item.get("type", "default")
+        templates = SIGNATURE_VIBE_TEMPLATES.get(cat, SIGNATURE_VIBE_TEMPLATES["default"])
+        template = random.choice(templates)
+        
+        cuisine = " / ".join(item.get("attributes", {}).get("cuisines", [])) or "local"
+        vibe = " / ".join(item.get("attributes", {}).get("vibes", [])) or "welcoming"
+        
+        return template.format(
+            venue=item.get("venue", "this spot"),
+            city=city,
+            cuisine=cuisine,
+            vibe=vibe
+        )
+
+    async def _parse_adjustment_request(self, user_text: str) -> Dict[str, Any]:
+        prompt = (
+            f"A user wants to adjust their travel itinerary with the following request: \"{user_text}\"\n"
+            "Translate this into a JSON object with strictly these keys:\n"
+            "1. 'category_bias': Dict mapping categories (dining, movie, cultural, entertainment, outdoor_relaxed, outdoor_active) to float weights (1.0 default, 2.0 for boost, 0.5 for avoid)\n"
+            "2. 'energy_limit': 'low', 'medium', or 'high'\n"
+            "3. 'is_solo_preference': boolean\n"
+            "4. 'specific_intent': a short string summarizing the new vibe.\n"
+            "Return ONLY the JSON object."
+        )
+        
+        key = os.environ.get("OPENROUTER_API_KEY", "")
+        async with httpx.AsyncClient() as client:
+            try:
+                resp = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                    json={
+                        "model": "z-ai/glm-4.5-air:free",
+                        "messages": [{"role": "user", "content": prompt}],
+                        "response_format": {"type": "json_object"}
+                    },
+                    timeout=10.0
+                )
+                if resp.status_code == 200:
+                    content = resp.json()["choices"][0]["message"]["content"]
+                    return json.loads(content)
+                elif resp.status_code == 429:
+                    logger.info("[LLM] OpenRouter rate limit reached (429). Jumping to keyword-based fallback.")
+            except Exception as e:
+                logger.info(f"[LLM] Adjustment parsing (external limit/error): {e}")
+        
+        text = user_text.lower()
+        bias = {}
+        if "movie" in text or "cinema" in text or "film" in text or "watch" in text:
+            bias["movie"] = 3.0
+            bias["outdoor_relaxed"] = 0.1
+            bias["outdoor_active"] = 0.1
+        if "park" in text or "walk" in text or "nature" in text or "nature" in text:
+            bias["outdoor_relaxed"] = 2.0
+            bias["movie"] = 0.5
+        if "eat" in text or "food" in text or "hungry" in text or "lunch" in text or "dinner" in text or "restaurant" in text or "cafe" in text:
+            bias["dining"] = 2.5
+        if "fun" in text or "game" in text or "active" in text or "play" in text or "sport" in text or "arcade" in text:
+            bias["entertainment"] = 2.0
+            bias["outdoor_active"] = 2.0
+            
+        energy = "medium"
+        if "chill" in text or "relax" in text or "tired" in text or "sit" in text:
+            energy = "low"
+        elif "active" in text or "hype" in text or "run" in text or "play" in text:
+            energy = "high"
+            
+        return {"category_bias": bias, "energy_limit": energy, "is_solo_preference": "solo" in text or "alone" in text, "specific_intent": "keyword matched adjustment"}
+
+    async def _audit_and_refine(self, schedule: List[Dict], group_prefs: Dict) -> Tuple[bool, Dict]:
+        if not schedule: return True, {}
+        
+        lines = "\n".join([f"{s['arrival_time']}-{s['departure_time']}: {s['venue']} ({s['type']})" for s in schedule])
+        prompt = (
+            "Critique this daily itinerary for a group of people. Is it truly enjoyable and 'human-passable'?\n"
+            "Check for: crazy pacing, back-to-back high energy, bad meal timing, excessive walking, or oscillation.\n"
+            f"Itinerary:\n{lines}\n"
+            "Return JSON exactly like this:\n"
+            "{\n"
+            "  \"is_passable\": boolean,\n"
+            "  \"score_out_of_10\": int,\n"
+            "  \"feedback\": \"one sentence explanation\",\n"
+            "  \"category_bias\": {\"outdoor_active\": 0.3, \"dining\": 1.5},\n"
+            "  \"energy_limit\": float\n"
+            "}"
+        )
+        
+        key = os.environ.get("OPENROUTER_API_KEY", "")
+        async with httpx.AsyncClient() as client:
+            try:
+                resp = await client.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                    json={
+                        "model": "z-ai/glm-4.5-air:free",
+                        "messages": [{"role": "user", "content": prompt}],
+                        "response_format": {"type": "json_object"}
+                    },
+                    timeout=15.0
+                )
+                if resp.status_code == 200:
+                    data = json.loads(resp.json()["choices"][0]["message"]["content"])
+                    logger.info(f"[Critic] {data.get('score_out_of_10')}/10 - {data.get('feedback')}")
+                    if not data.get("is_passable", True):
+                        logger.info(f"[Critic] Applying overrides to Engine: {data.get('category_bias', {})}")
+                    return data.get("is_passable", True), data
+            except Exception as e:
+                logger.warning(f"[Critic] Logic audit failed: {e}")
+        
+        return True, {}
     
     def _generate_fallback_summary(self, schedule: List[Dict], city: str, group_prefs: Dict) -> Tuple[str, str]:
-        cats = sorted({s["type"] for s in schedule})
-        total_cost = sum(float(s.get("estimated_cost", 0)) for s in schedule)
-        return (
-            f"Your {len(schedule)}-activity plan in {city} covers {', '.join(cats)}. "
-            f"Total estimated cost: Rs.{total_cost:.0f}.",
-            f"Selected {len(schedule)} diverse activities matching group preferences for {', '.join(cats)}."
+        if not schedule:
+            return (
+                "No activities could be scheduled.",
+                "The constraints were too tight or no venues were found nearby."
+            )
+        cats = list({s['type'] for s in schedule})
+        total_cost = sum(float(s.get('estimated_cost', 0)) for s in schedule)
+        first = schedule[0]
+        last = schedule[-1]
+        start_t = first.get('arrival_time', '?')
+        end_t = last.get('departure_time', '?')
+        energy = group_prefs.get('energy_level', 3)
+        energy_desc = 'relaxed' if energy <= 2 else ('high-energy' if energy >= 4 else 'balanced')
+        vibes = group_prefs.get('vibes', ['social'])
+        vibe_str = ' and '.join(vibes[:2]) if vibes else 'social'
+        budget = group_prefs.get('budget_range', 'medium')
+        
+        cat_friendly = {
+            'dining': 'dining', 'movie': 'cinema', 'outdoor_relaxed': 'outdoor relaxation',
+            'outdoor_active': 'active outdoor fun', 'cultural': 'cultural exploration',
+            'entertainment': 'entertainment'
+        }
+        cat_names = [cat_friendly.get(c, c) for c in cats]
+        
+        summary = (
+            f"Your {len(schedule)}-stop itinerary in {city} kicks off at {start_t} and wraps up at {end_t}, "
+            f"blending {', '.join(cat_names[:-1]) + ' and ' + cat_names[-1] if len(cat_names) > 1 else cat_names[0]}. "
+            f"The total spend comes to approximately ₹{total_cost:.0f} per person — perfect for a {budget}-budget outing."
         )
-    
+        reasoning = (
+            f"This {energy_desc} plan was built to match your {vibe_str} preferences within a {budget} budget. "
+            f"Activities are sequenced so the day flows naturally from {start_t} to {end_t}, "
+            f"with meals timed around your energy windows and travel kept short between stops. "
+            f"Every venue was chosen from {'live local data' if any(s.get('source') == 'live' for s in schedule) else 'curated recommendations'} "
+            f"to give you a genuine, do-able plan you can actually enjoy."
+        )
+        return summary, reasoning
+
     def _get_llm(self):
-        if self._llm is not None:
-            return self._llm
-        try:
-            from openai import AsyncOpenAI as _OAI
-            key = os.environ.get("OPENROUTER_API_KEY", "")
-            if key:
-                self._llm = _OAI(
-                    base_url="https://openrouter.ai/api/v1",
-                    api_key=key,
-                )
-                return self._llm
-        except ImportError:
-            pass
-        return None
+        return True
     
     async def generate_recommendation(
+        self, group_id: str, adjustment_context: Optional[str] = None
+    ) -> Dict[str, Any]:
+        if adjustment_context is None:
+            cached = self._generation_cache.get(group_id)
+            if cached:
+                result, ts = cached
+                age = datetime.now(timezone.utc).timestamp() - ts
+                if age < self._cache_ttl:
+                    logger.info(f"[Engine] Returning cached recommendation for group {group_id} (age={age:.1f}s)")
+                    return result
+        
+        if group_id not in self._generation_locks:
+            self._generation_locks[group_id] = asyncio.Lock()
+        lock = self._generation_locks[group_id]
+        
+        async with lock:
+            if adjustment_context is None:
+                cached = self._generation_cache.get(group_id)
+                if cached:
+                    result, ts = cached
+                    if datetime.now(timezone.utc).timestamp() - ts < self._cache_ttl:
+                        return result
+            return await self._generate_recommendation_impl(group_id, adjustment_context)
+    
+    async def _generate_recommendation_impl(
         self, group_id: str, adjustment_context: Optional[str] = None
     ) -> Dict[str, Any]:
         group = await self.db.group_sessions.find_one({"id": group_id}, {"_id": 0})
@@ -1794,7 +2778,6 @@ class HybridRecommendationEngine:
         start_min = self._parse_time(constraints.get("start_time", "09:00"))
         end_min = self._parse_time(constraints.get("end_time", "21:00"))
         budget = constraints.get("budget_range", "medium")
-        pref = constraints.get("indoor_outdoor", "both")
         is_vac = bool(constraints.get("is_vacation", False))
         vac_days = max(1, int(constraints.get("vacation_days", 1)))
         group_size = max(1, len(group.get("members", [])))
@@ -1846,64 +2829,158 @@ class HybridRecommendationEngine:
         group_prefs = self.pref_aggregator.aggregate_preferences(
             [p.get("preferences", {}) for p in member_prefs]
         )
+        group_prefs["member_count"] = group_size
 
         if budget:
             group_prefs["budget_range"] = budget
-        logger.info(f"[Engine] Group prefs: {group_prefs}")
+        group_prefs["weather_score"] = weather_score
+        logger.info(f"[Engine] Group prefs (including weather): {group_prefs}")
+
+        registered_user_ids = [
+            m["id"] for m in group.get("members", [])
+            if not m["id"].startswith("guest_")
+        ]
+        memory_bias: Dict[str, float] = {}
+        if registered_user_ids:
+            try:
+                mem_docs = await self.db.user_preference_memory.find(
+                    {"user_id": {"$in": registered_user_ids}}
+                ).to_list(20)
+                liked_counts: Dict[str, int] = defaultdict(int)
+                disliked_counts: Dict[str, int] = defaultdict(int)
+                for doc in mem_docs:
+                    for cat in doc.get("liked_categories", []):
+                        liked_counts[cat] += 1
+                    for cat in doc.get("disliked_categories", []):
+                        disliked_counts[cat] += 1
+                for cat in set(list(liked_counts.keys()) + list(disliked_counts.keys())):
+                    likes = liked_counts.get(cat, 0)
+                    dislikes = disliked_counts.get(cat, 0)
+                    total = likes + dislikes
+                    if total > 0:
+                        ratio = likes / total
+                        memory_bias[cat] = round(0.3 + ratio * 1.7, 2)
+                if memory_bias:
+                    logger.info(f"[Engine] User memory bias applied: {memory_bias}")
+            except Exception as e:
+                logger.warning(f"[Engine] Could not load user preference memory: {e}")
 
         alpha = float(group_prefs.get("exploration_factor", 1.5))
         self.bandit.set_alpha(alpha)
         logger.info(f"[Engine] RL Alpha set to {alpha}")
 
-        allowed_cats = [c for c in ACTIONS if c in PREF_ALLOWED.get(
-            group_prefs.get("indoor_outdoor", "both"), set(ACTIONS)
-        )]
+        allowed_cats = list(ACTIONS)
 
-        pool = await self._fetch_activities(centroid[0], centroid[1], allowed_cats, group_prefs)
+        if adjustment_context:
+            adj_lower = adjustment_context.lower()
+            if "movie" in adj_lower or "cinema" in adj_lower or "film" in adj_lower:
+                if "movie" not in allowed_cats: allowed_cats.append("movie")
+                group_prefs["genres"] = group_prefs.get("genres", []) + ["action", "drama", "comedy"]
+            if "eat" in adj_lower or "food" in adj_lower or "restaurant" in adj_lower or "dine" in adj_lower:
+                if "dining" not in allowed_cats: allowed_cats.append("dining")
+            if "active" in adj_lower or "outdoor" in adj_lower or "park" in adj_lower:
+                if "outdoor_active" not in allowed_cats: allowed_cats.append("outdoor_active")
+                if "outdoor_relaxed" not in allowed_cats: allowed_cats.append("outdoor_relaxed")
+            if "culture" in adj_lower or "museum" in adj_lower:
+                if "cultural" not in allowed_cats: allowed_cats.append("cultural")
+
+        pool = await self._fetch_activities(centroid[0], centroid[1], city_name, allowed_cats, group_prefs)
 
         context = {
             "budget": budget,
-            "indoor_outdoor": group_prefs.get("indoor_outdoor", "both"),
             "group_size": group_size,
             "weather_score": weather_score,
             "is_weekend": is_weekend,
         }
 
+        adjustment_bias = {}
+        if adjustment_context:
+            logger.info(f"[Engine] Processing adjustment: {adjustment_context}")
+            adj_data = await self._parse_adjustment_request(adjustment_context)
+            adjustment_bias = adj_data.get("category_bias", {})
+            group_prefs["energy_level"] = {"low": 1.0, "medium": 3.0, "high": 5.0}.get(adj_data.get("energy_limit"), 3.0)
+            logger.info(f"[Engine] Intent: {adj_data.get('specific_intent')}")
+
+        merged_bias = {**memory_bias}
+        for cat, mult in adjustment_bias.items():
+            merged_bias[cat] = merged_bias.get(cat, 1.0) * mult
+
         final_schedule: List[Dict] = []
         exclusion_set: set = set()
         days = vac_days if is_vac else 1
         
-        for day in range(days):
-            day_pool = {cat: list(items) for cat, items in pool.items()}
-            daily = self.builder.build(
-                day_pool, context, start_min, end_min,
-                centroid, group_prefs, exclusion_set
-            )
-            for item in daily:
-                item["day"] = day + 1
-            final_schedule.extend(daily)
+        attempts = 0
+        while attempts < 2:
+            attempts += 1
+            current_schedule = []
+            for day in range(days):
+                day_pool = {cat: list(items) for cat, items in pool.items()}
+                daily = self.builder.build(
+                    day_pool, context, start_min, end_min,
+                    centroid, group_prefs, exclusion_set,
+                    adjustment_context=adjustment_context,
+                    category_bias=merged_bias
+                )
+                for item in daily: item["day"] = day + 1
+                current_schedule.extend(daily)
+            
+            is_passable, correction_data = await self._audit_and_refine(current_schedule, group_prefs)
+            if is_passable or attempts >= 2:
+                final_schedule = current_schedule
+                break
+            else:
+                logger.info(f"[Engine] Audit failed. Retrying with explicit structured biases...")
+                ai_biases = correction_data.get("category_bias", {})
+                for cat, v in ai_biases.items():
+                    merged_bias[cat] = float(v)
+                if "energy_limit" in correction_data:
+                    group_prefs["energy_level"] = float(correction_data["energy_limit"])
 
-        summary, reasoning = await self._llm_summary(
-            final_schedule, city_name, constraints, group_prefs
+        missing_requested = []
+        if adjustment_context:
+            adj_lower = adjustment_context.lower()
+            requested_cats = {
+                "movie": ["movie", "cinema", "film"],
+                "dining": ["eat", "food", "restaurant", "dine"],
+                "outdoor_active": ["active", "outdoor", "park"],
+                "cultural": ["culture", "museum"]
+            }
+            for cat, keywords in requested_cats.items():
+                if any(k in adj_lower for k in keywords):
+                    if not any(s["type"] == cat for s in final_schedule):
+                        missing_requested.append(cat)
+
+        summary, reasoning = await self._enrich_schedule_with_llm(
+            final_schedule, city_name, constraints, group_prefs, missing_requested
         )
         
-        return {
+        sources_used = list({s.get('source', 'sample') for s in final_schedule})
+        has_live = 'live' in sources_used
+        
+        result = {
             "schedule": final_schedule,
+            "summary": summary,
             "reasoning": reasoning,
             "diagnostics": {
                 "city": city_name,
-                "summary": summary,
+                "missing_requested": missing_requested,
                 "weather_score": round(weather_score, 2),
-                "data_source": "web_search+sample",
+                "data_source": "live" if has_live else "sample",
                 "activity_count": len(final_schedule),
                 "budget_tier": budget,
-                "indoor_outdoor": pref,
                 "group_prefs": group_prefs,
                 "centroid": {"lat": centroid[0], "lon": centroid[1]},
+                "is_vacation": is_vac,
+                "vacation_days": vac_days,
+                "audit_attempts": attempts
             },
         }
+        
+        self._generation_cache[group_id] = (result, datetime.now(timezone.utc).timestamp())
+        return result
     
-    async def update_from_feedback(self, recommendation_id: str, feedback: Dict):
+    async def update_from_feedback(self, recommendation_id: str, feedback: Dict,
+                                   source: str = "user_feedback"):
         try:
             rec = await self.db.recommendations.find_one({"id": recommendation_id})
             if not rec:
@@ -1916,7 +2993,6 @@ class HybridRecommendationEngine:
             constraints = group.get("constraints", {})
             base_ctx = {
                 "budget": constraints.get("budget_range", "medium"),
-                "indoor_outdoor": constraints.get("indoor_outdoor", "both"),
                 "group_size": max(1, len(group.get("members", []))),
                 "weather_score": 0.7,
                 "is_weekend": False,
@@ -1947,11 +3023,49 @@ class HybridRecommendationEngine:
                 }
                 
                 self.bandit.update(cat, ctx, reward)
-                logger.info(f"[RL] Updated arm={cat} reward={reward:.3f}")
+                logger.info(f"[RL] Updated arm={cat} reward={reward:.3f} source={source}")
             
             await self._save_model()
+
+            if source == "user_feedback":
+                user_ids = [
+                    m["id"] for m in group.get("members", [])
+                    if not m["id"].startswith("guest_")
+                ]
+                await self.update_user_preference_memory(user_ids, feedback)
+
         except Exception as exc:
             logger.warning(f"Feedback update error: {exc}")
+
+    async def update_user_preference_memory(self, user_ids: List[str], feedback: Dict):
+        liked = [
+            r["category"] for r in feedback.get("activity_ratings", [])
+            if r.get("score", 3) >= 4 and r.get("category") in ACTIONS
+        ]
+        disliked = [
+            r["category"] for r in feedback.get("activity_ratings", [])
+            if r.get("score", 3) <= 2 and r.get("category") in ACTIONS
+        ]
+        if not liked and not disliked:
+            return
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for uid in user_ids:
+            try:
+                await self.db.user_preference_memory.update_one(
+                    {"user_id": uid},
+                    {
+                        "$push": {
+                            "liked_categories":    {"$each": liked},
+                            "disliked_categories": {"$each": disliked},
+                        },
+                        "$set":  {"updated_at": now_iso},
+                        "$setOnInsert": {"user_id": uid, "created_at": now_iso},
+                    },
+                    upsert=True
+                )
+                logger.info(f"[Memory] Updated preference memory for user {uid}: liked={liked} disliked={disliked}")
+            except Exception as e:
+                logger.warning(f"[Memory] Could not update memory for {uid}: {e}")
 
 __all__ = [
     "HybridRecommendationEngine",

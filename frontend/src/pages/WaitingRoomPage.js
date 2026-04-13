@@ -19,16 +19,22 @@ const WaitingRoomPage = () => {
     const fetchMembers = async () => {
       try {
         const response = await getGroupMembers(groupId);
-        setMembers(response.data.members);
-        setTotal(response.data.total);
-        setSubmitted(response.data.submitted);
+        const { members: m, total: t, submitted: s } = response.data;
+        setMembers(m);
+        setTotal(t);
+        setSubmitted(s);
         setLoading(false);
 
-        if (response.data.submitted >= response.data.total) {
+        if (t <= 1) {
+          navigate(`/group/${groupId}/recommendations`, { replace: true });
+          return;
+        }
+
+        if (s >= t) {
           toast.success('Everyone is ready!');
           setTimeout(() => {
             navigate(`/group/${groupId}/recommendations`);
-          }, 1500);
+          }, 1000);
         }
       } catch (error) {
         toast.error('Failed to load group status');

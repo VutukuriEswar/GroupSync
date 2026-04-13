@@ -12,3 +12,4 @@ httpx
 bcrypt
 selenium
 webdriver-manager
+selenium-stealth

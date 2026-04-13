@@ -25,11 +25,9 @@ function App() {
             <Route path="/register" element={<RegisterPage />} />
             <Route path="/dashboard" element={<DashboardPage />} />
             <Route path="/profile" element={<ProfilePage />} />
-
             <Route path="/group/create" element={<GroupSetupPage />} />
-
             <Route path="/group/:groupId" element={<GroupSetupPage />} />
-
+            <Route path="/group/:groupId/edit" element={<GroupSetupPage isEditing={true} />} />
             <Route path="/group/:groupId/survey" element={<PreferenceSurveyPage />} />
             <Route path="/group/:groupId/waiting" element={<WaitingRoomPage />} />
             <Route path="/group/:groupId/recommendations" element={<RecommendationsPage />} />

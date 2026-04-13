@@ -53,24 +53,15 @@ class UserLogin(BaseModel):
 class GroupSessionCreate(BaseModel):
     name: str
     start_date: str
-    end_date: str
     start_time: str
     end_time: str
-    indoor_outdoor: str
     budget_range: Optional[str] = None
-    ott_subscriptions: Optional[List[str]] = None
-    board_games: Optional[List[str]] = None
-    is_vacation: Optional[bool] = False
-    vacation_days: Optional[int] = 1
-    destination_choice: Optional[str] = None
 
 class GroupSessionUpdate(BaseModel):
     name: Optional[str] = None
     start_date: Optional[str] = None
-    end_date: Optional[str] = None
     start_time: Optional[str] = None
     end_time: Optional[str] = None
-    indoor_outdoor: Optional[str] = None
     budget_range: Optional[str] = None
 
 class GroupSessionResponse(BaseModel):
@@ -99,7 +90,6 @@ class RecommendationResponse(BaseModel):
     id: str
     group_id: str
     schedule: List[Dict[str, Any]]
-    reasoning: str
     created_at: str
 
 class ReplanRequest(BaseModel):
@@ -219,11 +209,7 @@ async def create_group(body: GroupSessionCreate,
     creator_id = user["user_id"] if user else f"guest_{str(uuid.uuid4())[:8]}"
     invite_code = "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
     gid = str(uuid.uuid4())
-    schedule_display = (
-        f"{body.start_date} | {body.start_time} - {body.end_time}"
-        if body.start_date == body.end_date
-        else f"{body.start_date} to {body.end_date} | {body.start_time} - {body.end_time}"
-    )
+    schedule_display = f"{body.start_date} | {body.start_time} - {body.end_time}"
     doc = {
         "id": gid, "name": body.name, "creator_id": creator_id,
         "invite_code": invite_code, "status": "lobby",
@@ -256,8 +242,7 @@ async def update_group(group_id: str, body: GroupSessionUpdate,
         )
     constraint_updates = {
         "constraints." + f: fields[f]
-        for f in ["start_date", "end_date", "start_time", "end_time",
-                  "indoor_outdoor", "budget_range"]
+        for f in ["start_date", "start_time", "end_time", "budget_range"]
         if f in fields
     }
     if constraint_updates:
@@ -434,11 +419,23 @@ async def submit_preferences(body: PreferenceSubmit):
                 {"id": body.user_id},
                 {"$set": {"default_preferences": body.preferences}},
             )
+    pref_query = {"group_id": body.group_id}
+    if body.user_id:
+        pref_query["user_id"] = body.user_id
+    else:
+        pref_query["session_id"] = body.session_id
     pid = str(uuid.uuid4())
-    await db.preferences.insert_one({
-        "id": pid, **body.model_dump(),
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    })
+    await db.preferences.update_one(
+        pref_query,
+        {
+            "$set": {
+                **body.model_dump(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            },
+            "$setOnInsert": {"id": pid}
+        },
+        upsert=True
+    )
     group = await db.group_sessions.find_one({"id": body.group_id}, {"_id": 0})
     if group:
         prefs = await db.preferences.find(
@@ -450,7 +447,7 @@ async def submit_preferences(body: PreferenceSubmit):
         ])
         if reg_count > 0 and len(prefs) >= reg_count:
             await db.group_sessions.update_one(
-                {"id": body.group_id}, {"$set": {"status": "ready"}}
+                {"id": body.group_id}, {"$set": {"status": "preferences"}}
             )
     return {"id": pid, "message": "Preferences submitted"}
 
@@ -465,14 +462,13 @@ async def generate_recommendation(body: RecommendationRequest):
         doc = {
             "id": rid, "group_id": body.group_id,
             "schedule": result["schedule"],
-            "reasoning": result["reasoning"],
             "diagnostics": result.get("diagnostics", {}),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         await db.recommendations.insert_one(doc)
         return RecommendationResponse(
             id=rid, group_id=body.group_id,
-            schedule=result["schedule"], reasoning=result["reasoning"],
+            schedule=result["schedule"],
             created_at=doc["created_at"],
         )
     except Exception as exc:
@@ -504,6 +500,7 @@ async def replan(body: ReplanRequest):
         body.recommendation_id,
         {"overall_satisfaction": 2, "activity_ratings": [],
          "adjustment": body.adjustment},
+        source="ai_replan",
     )
     result = await rl_engine.generate_recommendation(
         rec["group_id"], adjustment_context=body.adjustment

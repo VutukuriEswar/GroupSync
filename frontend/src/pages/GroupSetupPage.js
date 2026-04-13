@@ -9,17 +9,20 @@ import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Sparkles, ArrowLeft, Copy, Check, Loader2, CircleCheck, MapPin, UserX, Navigation } from 'lucide-react';
+import { Sparkles, ArrowLeft, Copy, Check, Loader2, CircleCheck, MapPin, UserX, Navigation, Calendar, Clock } from 'lucide-react';
 import { toast } from 'sonner';
 import axios from 'axios';
+import { format, parseISO, isToday, addMinutes, startOfDay, setHours, setMinutes } from 'date-fns';
+import { Calendar as CalendarUI } from '@/components/ui/calendar';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { cn } from '@/lib/utils';
 
-const GroupSetupPage = () => {
+const GroupSetupPage = ({ isEditing = false }) => {
   const navigate = useNavigate();
   const location = useLocation();
   const { token, user } = useAuth();
   const { groupId: urlGroupId } = useParams();
 
-  const isSoloPlan = location.state?.isSolo || false;
 
   const [loading, setLoading] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
@@ -46,19 +49,13 @@ const GroupSetupPage = () => {
   const [formData, setFormData] = useState({
     name: '',
     event_date: today,
-    end_date: today,
     start_time: '',
     end_time: '',
-    indoor_outdoor: 'both',
     budget_range: 'medium',
-    ott_subscriptions: [],
-    board_games: [],
-    is_vacation: false,
-    vacation_days: 1,
-    destination_choice: '',
-
     meeting_place: ''
   });
+
+  const isSoloPlan = location.state?.isSolo || formData.name === "Solo Plan";
 
   const popularAreas = [
     'MG Road', 'Benz Circle', 'Governorpet', 'Moghalrajpuram',
@@ -74,46 +71,91 @@ const GroupSetupPage = () => {
     return `${hours}:${minutes}`;
   };
 
+  const generateTimeOptions = () => {
+    const options = [];
+    let current = startOfDay(new Date());
+    const end = startOfDay(new Date());
+    end.setHours(23, 59, 59);
+
+    while (current <= end) {
+      options.push(format(current, 'HH:mm'));
+      current = addMinutes(current, 30);
+    }
+    return options;
+  };
+
+  const timeOptions = generateTimeOptions();
+
   useEffect(() => {
     const nowTime = getCurrentTime();
     setMinStartTime(nowTime);
     setMinEndTime(nowTime);
   }, []);
 
-  const ottOptions = ['Netflix', 'Prime Video', 'Disney+', 'HBO Max', 'Hulu'];
-  const gamesOptions = ['Chess', 'Monopoly', 'Scrabble', 'Cards', 'Jenga'];
-
-  const handleDateChange = (e) => {
-    const newDate = e.target.value;
-    setFormData({ ...formData, event_date: newDate, end_date: newDate });
+  const handleDateSelect = (date) => {
+    if (!date) return;
+    const newDate = format(date, 'yyyy-MM-dd');
     const nowTime = getCurrentTime();
+
     if (newDate === today) {
       setMinStartTime(nowTime);
       setMinEndTime(nowTime);
     } else {
-      setMinStartTime("00:00");
-      setMinEndTime("00:00");
+      setMinStartTime('00:00');
+      setMinEndTime('00:00');
     }
-    setFormData(prev => ({ ...prev, start_time: '', end_time: '' }));
+
+    setFormData(prev => ({
+      ...prev,
+      event_date: newDate,
+      start_time: '',
+      end_time: '',
+    }));
   };
 
-  const handleStartTimeChange = (e) => {
-    const newTime = e.target.value;
-    setFormData({ ...formData, start_time: newTime });
-    setMinEndTime(newTime);
+  const handleStartTimeChange = (val) => {
+    setFormData({ ...formData, start_time: val });
+    setMinEndTime(val);
+    if (formData.end_time && formData.end_time <= val) {
+      setFormData(prev => ({ ...prev, end_time: '' }));
+    }
   };
 
   useEffect(() => {
     if (urlGroupId) {
       setGroupId(urlGroupId);
-      setStep(2);
+
+      const setupEdit = async () => {
+        if (isEditing) {
+          try {
+            const res = await axios.get(`${process.env.REACT_APP_BACKEND_URL}/api/groups/${urlGroupId}`, {
+              headers: { Authorization: `Bearer ${token}` }
+            });
+            const c = res.data.constraints;
+            setFormData({
+              name: res.data.name,
+              event_date: c.start_date,
+              start_time: c.start_time,
+              end_time: c.end_time,
+              budget_range: c.budget_range || 'medium',
+              meeting_place: c.meeting_place || ''
+            });
+          } catch (e) {
+            toast.error("Failed to load group details for editing");
+          }
+        } else {
+          setStep(2);
+        }
+      };
+
+      setupEdit();
 
       const myCreatedGroup = localStorage.getItem('createdGroupId');
       if (myCreatedGroup === urlGroupId) {
         setICreatedThisGroup(true);
       }
     }
-  }, [urlGroupId]);
+  }, [urlGroupId, isEditing, token]);
 
   useEffect(() => {
     let interval;
@@ -138,14 +180,9 @@ const GroupSetupPage = () => {
           if (groupRes.data.constraints) {
             setFormData(prev => ({
               ...prev,
-              is_vacation: groupRes.data.constraints.is_vacation || false,
-              destination_choice: groupRes.data.constraints.destination_choice || '',
+              name: groupRes.data.name,
               meeting_place: groupRes.data.constraints.meeting_place || ''
             }));
-
-            if (groupRes.data.constraints.meeting_place) {
-              setHasMeetingPlace(true);
-            }
           }
 
           if (groupRes.data.status === 'preferences') {
@@ -184,21 +221,25 @@ const GroupSetupPage = () => {
       const payload = {
         name: isSoloPlan ? "Solo Plan" : formData.name,
         start_date: formData.event_date,
-        end_date: formData.end_date || formData.event_date,
         start_time: formData.start_time,
         end_time: formData.end_time,
-        indoor_outdoor: formData.indoor_outdoor,
         budget_range: formData.budget_range,
-        ott_subscriptions: formData.ott_subscriptions,
-        board_games: formData.board_games,
-        is_vacation: formData.is_vacation,
-        vacation_days: formData.vacation_days,
-        destination_choice: formData.destination_choice,
-
         meeting_place: formData.meeting_place || null
       };
 
-      const response = await createGroup(payload, token);
+      let response;
+      if (isEditing) {
+        response = await axios.put(`${process.env.REACT_APP_BACKEND_URL}/api/groups/${groupId}`, payload, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        toast.success('Group settings updated!');
+        setStep(2);
+        setLoading(false);
+        return;
+      } else {
+        response = await createGroup(payload, token);
+      }
+
       const newGroupId = response.data.id;
       const myMemberId = response.data.creator_id || response.data.members?.[0]?.id;
 
@@ -212,7 +253,6 @@ const GroupSetupPage = () => {
       }
 
       if (isSoloPlan) {
-
         try {
           const config = { headers: {} };
           const body = {};
@@ -226,10 +266,10 @@ const GroupSetupPage = () => {
           );
 
           toast.success('Solo plan created! Starting survey...');
-          navigate(`/group/${newGroupId}/survey`);
+          navigate(`/group/${newGroupId}/survey`, { state: { isSolo: true } });
         } catch (startError) {
           console.error(startError);
-          toast.error("Failed to start solo session");
+          toast.error('Failed to start solo session');
           navigate(`/group/${newGroupId}`);
         }
       } else {
@@ -365,28 +405,34 @@ const GroupSetupPage = () => {
               <div className="w-20 h-20 rounded-full bg-primary/10 flex items-center justify-center mx-auto mb-4">
                 <Sparkles className="w-10 h-10 text-primary" />
               </div>
-              <CardTitle className="text-3xl font-outfit font-bold">Group Lobby</CardTitle>
-              <CardDescription className="text-base">Waiting for members to join...</CardDescription>
+              <CardTitle className="text-3xl font-outfit font-bold">
+                {isSoloPlan ? "Plan Details" : "Group Lobby"}
+              </CardTitle>
+              <CardDescription className="text-base">
+                {isSoloPlan ? "Confirm your location and let's go!" : "Waiting for members to join..."}
+              </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
-              <div className="bg-primary/5 rounded-2xl p-8 text-center">
-                <Label className="text-sm text-muted-foreground mb-2 block">Invite Code</Label>
-                <div className="text-5xl font-mono font-bold tracking-widest text-primary mb-4" data-testid="invite-code-display">
-                  {inviteCode}
+              {!isSoloPlan && (
+                <div className="bg-primary/5 rounded-2xl p-8 text-center">
+                  <Label className="text-sm text-muted-foreground mb-2 block">Invite Code</Label>
+                  <div className="text-5xl font-mono font-bold tracking-widest text-primary mb-4" data-testid="invite-code-display">
+                    {inviteCode}
+                  </div>
+                  <Button
+                    variant="outline"
+                    onClick={copyInviteCode}
+                    className="rounded-full"
+                    data-testid="copy-invite-code-btn"
+                  >
+                    {copiedCode ? (
+                      <><Check className="w-4 h-4 mr-2" /> Copied!</>
+                    ) : (
+                      <><Copy className="w-4 h-4 mr-2" /> Copy Code</>
+                    )}
+                  </Button>
                 </div>
-                <Button
-                  variant="outline"
-                  onClick={copyInviteCode}
-                  className="rounded-full"
-                  data-testid="copy-invite-code-btn"
-                >
-                  {copiedCode ? (
-                    <><Check className="w-4 h-4 mr-2" /> Copied!</>
-                  ) : (
-                    <><Copy className="w-4 h-4 mr-2" /> Copy Code</>
-                  )}
-                </Button>
-              </div>
+              )}
 
               {hasMeetingPlace && formData.meeting_place && (
                 <div className="bg-green-50 border border-green-200 rounded-xl p-4 flex items-center gap-3">
@@ -399,75 +445,110 @@ const GroupSetupPage = () => {
               )}
 
               <div className="space-y-3">
-                <p className="text-center text-muted-foreground">
-                  Once everyone is here, creator will continue.
-                </p>
-                <div className="space-y-2">
-                  <h3 className="font-semibold text-center">Joined Members ({members.length})</h3>
-                  <div className="max-h-60 overflow-y-auto space-y-2">
-                    {members.map((m, i) => {
-                      const isMe = (user?.id === m.id || user?.user_id === m.id || localStorage.getItem('current_member_id') === m.id);
-                      const hasLoc = m.location && m.location.lat !== 0;
+                {!isSoloPlan && (
+                  <p className="text-center text-muted-foreground">
+                    Once everyone is here, creator will continue.
+                  </p>
+                )}
+                {!isSoloPlan && (
+                  <div className="space-y-2">
+                    <h3 className="font-semibold text-center">Joined Members ({members.length})</h3>
+                    <div className="max-h-60 overflow-y-auto space-y-2">
+                      {members.map((m, i) => {
+                        const isMe = (user?.id === m.id || user?.user_id === m.id || localStorage.getItem('current_member_id') === m.id);
+                        const hasLoc = m.location && m.location.lat !== 0;
 
-                      return (
-                        <div key={i} className="flex items-center justify-between p-3 glass rounded-lg">
-                          <div className="flex items-center gap-3">
-                            <div className="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center font-semibold text-sm">
-                              {m.role === 'creator' ? '👑' : m.name ? m.name.charAt(0).toUpperCase() : '?'}
+                        return (
+                          <div key={i} className="flex items-center justify-between p-3 glass rounded-lg">
+                            <div className="flex items-center gap-3">
+                              <div className="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center font-semibold text-sm">
+                                {m.role === 'creator' ? '👑' : m.name ? m.name.charAt(0).toUpperCase() : '?'}
+                              </div>
+                              <div>
+                                <p className="font-medium">
+                                  {m.name || 'Loading...'}
+                                  {isMe && <span className="text-xs text-muted-foreground ml-1">(You)</span>}
+                                </p>
+                                {hasMeetingPlace ? (
+                                  <p className="text-xs text-green-600 flex items-center gap-1">
+                                    <Navigation className="w-3 h-3" /> Meeting at: {formData.meeting_place}
+                                  </p>
+                                ) : hasLoc ? (
+                                  <p className="text-xs text-green-600 flex items-center gap-1">
+                                    <MapPin className="w-3 h-3" /> Located
+                                  </p>
+                                ) : (
+                                  <p className="text-xs text-muted-foreground">Location Unknown</p>
+                                )}
+                              </div>
                             </div>
-                            <div>
-                              <p className="font-medium">
-                                {m.name || 'Loading...'}
-                                {isMe && <span className="text-xs text-muted-foreground ml-1">(You)</span>}
-                              </p>
-                              {hasMeetingPlace ? (
-                                <p className="text-xs text-green-600 flex items-center gap-1">
-                                  <Navigation className="w-3 h-3" /> Meeting at: {formData.meeting_place}
-                                </p>
-                              ) : hasLoc ? (
-                                <p className="text-xs text-green-600 flex items-center gap-1">
-                                  <MapPin className="w-3 h-3" /> Located
-                                </p>
-                              ) : (
-                                <p className="text-xs text-muted-foreground">Location Unknown</p>
+
+                            <div className="flex items-center gap-2">
+                              {!hasMeetingPlace && isMe ? (
+                                updatingLocation ? (
+                                  <Loader2 className="w-4 h-4 animate-spin text-primary" />
+                                ) : myLocation ? (
+                                  <CircleCheck className="w-4 h-4 text-green-500" />
+                                ) : (
+                                  <Button size="sm" variant="outline" onClick={handleGetLocation} className="text-xs h-8">
+                                    <MapPin className="w-3 h-3 mr-1" /> Locate
+                                  </Button>
+                                )
+                              ) : null}
+                              {isCreator && m.role !== 'creator' && (
+                                <Button variant="ghost" size="sm" className="text-red-500 hover:bg-red-50 h-8" onClick={() => handleRemoveMember(m.id)}>
+                                  <UserX className="w-4 h-4" />
+                                </Button>
                               )}
                             </div>
                           </div>
-
-                          <div className="flex items-center gap-2">
-                            {!hasMeetingPlace && isMe ? (
-                              updatingLocation ? (
-                                <Loader2 className="w-4 h-4 animate-spin text-primary" />
-                              ) : myLocation ? (
-                                <CircleCheck className="w-4 h-4 text-green-500" />
-                              ) : (
-                                <Button size="sm" variant="outline" onClick={handleGetLocation} className="text-xs h-8">
-                                  <MapPin className="w-3 h-3 mr-1" /> Locate
-                                </Button>
-                              )
-                            ) : null}
-                            {isCreator && m.role !== 'creator' && (
-                              <Button variant="ghost" size="sm" className="text-red-500 hover:bg-red-50 h-8" onClick={() => handleRemoveMember(m.id)}>
-                                <UserX className="w-4 h-4" />
-                              </Button>
-                            )}
+                        );
+                      })}
+                      {fetchingMembers && <Loader2 className="w-4 h-4 animate-spin mx-auto" />}
+                    </div>
+                  </div>
+                )}
+                {isSoloPlan && members.length > 0 && (
+                  <div className="space-y-4">
+                    {members.map((m, i) => {
+                      const isMe = (user?.id === m.id || user?.user_id === m.id || localStorage.getItem('current_member_id') === m.id);
+                      if (!isMe) return null;
+                      const hasLoc = m.location && m.location.lat !== 0;
+                      return (
+                        <div key={i} className="glass p-6 rounded-2xl border-2 border-primary/20 text-center">
+                          <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center mx-auto mb-4">
+                            <MapPin className="w-8 h-8 text-primary" />
                           </div>
+                          <h3 className="text-xl font-bold mb-2">Your Location</h3>
+                          {hasLoc ? (
+                            <p className="text-green-600 font-medium mb-4 flex items-center justify-center gap-2">
+                              <CircleCheck className="w-5 h-5" /> Location Saved!
+                            </p>
+                          ) : (
+                            <p className="text-muted-foreground mb-4">Sharing your location helps us find better activities nearby.</p>
+                          )}
+                          <Button
+                            onClick={handleGetLocation}
+                            disabled={updatingLocation}
+                            variant={hasLoc ? "outline" : "default"}
+                            className="w-full rounded-full"
+                          >
+                            {updatingLocation ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Locating...</> : (hasLoc ? "Update Location" : "Locate Me")}
+                          </Button>
                         </div>
                       );
                     })}
-                    {fetchingMembers && <Loader2 className="w-4 h-4 animate-spin mx-auto" />}
                   </div>
-                </div>
+                )}
 
                 {isCreator ? (
                   <Button
                     className="w-full rounded-full shadow-lg shadow-primary/20"
                     size="lg"
                     onClick={handleStartSession}
-                    disabled={isAlone}
                     data-testid="continue-to-survey-btn"
                   >
-                    {isAlone ? "Wait for at least 1 more person" : "Everyone is here! Continue to Preferences"}
+                    {isAlone ? "Start Alone (Continue)" : "Everyone is here! Continue to Preferences"}
                   </Button>
                 ) : (
                   <div className="w-full text-center text-sm text-muted-foreground py-3 bg-muted/30 rounded-lg border border-dashed">
@@ -526,7 +607,7 @@ const GroupSetupPage = () => {
                   </div>
                 )}
 
-                <div className="space-y-2">
+                <div className="space-y-3">
                   <Label htmlFor="meeting_place" className="text-base font-medium">
                     Meeting Place <span className="text-muted-foreground font-normal">(Optional)</span>
                   </Label>
@@ -559,82 +640,92 @@ const GroupSetupPage = () => {
                   </div>
                 </div>
 
-                <div className="flex items-center space-x-2 p-4 border rounded-lg bg-blue-50/50">
-                  <Checkbox
-                    id="vacation-mode"
-                    checked={formData.is_vacation}
-                    onCheckedChange={(checked) => setFormData({ ...formData, is_vacation: checked })}
-                  />
-                  <div className="grid gap-1.5 leading-none">
-                    <label
-                      htmlFor="vacation-mode"
-                      className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
-                    >
-                      Vacation Mode
-                    </label>
-                    <p className="text-xs text-muted-foreground">
-                      Plan a multi-day trip itinerary.
-                    </p>
+                <div className="space-y-6 bg-primary/5 p-6 rounded-3xl border-2 border-primary/10">
+                  <div className="flex items-center gap-3 mb-2">
+                    <Calendar className="w-6 h-6 text-primary" />
+                    <Label className="text-xl font-outfit font-bold">When is the fun?</Label>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="space-y-3">
+                      <Label className="text-sm font-medium text-muted-foreground uppercase tracking-wider">Date</Label>
+                      <Popover>
+                        <PopoverTrigger asChild>
+                          <Button
+                            variant="outline"
+                            className={cn(
+                              "w-full justify-start text-left font-normal text-lg h-14 rounded-2xl border-2 transition-all bg-background px-4",
+                              !formData.event_date && "text-muted-foreground"
+                            )}
+                          >
+                            <Calendar className="mr-3 h-5 w-5 text-primary" />
+                            {formData.event_date ? format(parseISO(formData.event_date), "PPP") : <span>Pick a date</span>}
+                          </Button>
+                        </PopoverTrigger>
+                        <PopoverContent className="w-auto p-0" align="start">
+                          <CalendarUI
+                            mode="single"
+                            selected={parseISO(formData.event_date)}
+                            onSelect={handleDateSelect}
+                            initialFocus
+                            disabled={(date) => date < startOfDay(new Date())}
+                          />
+                        </PopoverContent>
+                      </Popover>
+                    </div>
+
+                    <div className="space-y-3">
+                      <Label className="text-sm font-medium text-muted-foreground uppercase tracking-wider">Time Range</Label>
+                      <div className="flex items-center gap-3">
+                        <Select value={formData.start_time} onValueChange={handleStartTimeChange}>
+                          <SelectTrigger className="flex-1 text-lg h-14 rounded-2xl border-2 focus:border-primary transition-all bg-background px-4">
+                            <Clock className="mr-2 h-5 w-5 text-muted-foreground" />
+                            <SelectValue placeholder="Start" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {timeOptions.map(t => {
+                              const disabled = formData.event_date === today && t < minStartTime;
+                              return (
+                                <SelectItem key={t} value={t} disabled={disabled}>
+                                  {format(setMinutes(setHours(new Date(), parseInt(t.split(':')[0])), parseInt(t.split(':')[1])), 'hh:mm a')}
+                                </SelectItem>
+                              );
+                            })}
+                          </SelectContent>
+                        </Select>
+
+                        <span className="text-muted-foreground font-bold">to</span>
+
+                        <Select
+                          value={formData.end_time}
+                          onValueChange={(val) => setFormData({ ...formData, end_time: val })}
+                          disabled={!formData.start_time}
+                        >
+                          <SelectTrigger className="flex-1 text-lg h-14 rounded-2xl border-2 focus:border-primary transition-all bg-background px-4">
+                            <Clock className="mr-2 h-5 w-5 text-muted-foreground" />
+                            <SelectValue placeholder="End" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {timeOptions.map(t => {
+                              const disabled = t <= formData.start_time;
+                              return (
+                                <SelectItem key={t} value={t} disabled={disabled}>
+                                  {format(setMinutes(setHours(new Date(), parseInt(t.split(':')[0])), parseInt(t.split(':')[1])), 'hh:mm a')}
+                                </SelectItem>
+                              );
+                            })}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </div>
                   </div>
                 </div>
 
-                {formData.is_vacation && (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 border rounded-lg bg-primary/5 animate-in slide-in-from-top-4 duration-300">
-                    <div className="space-y-2">
-                      <Label htmlFor="vacation_days">Number of Days</Label>
-                      <Input
-                        id="vacation_days"
-                        type="number"
-                        min="1"
-                        value={formData.vacation_days}
-                        onChange={(e) => setFormData({ ...formData, vacation_days: parseInt(e.target.value) })}
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="destination">Destination (Optional)</Label>
-                      <Input
-                        id="destination"
-                        placeholder="e.g. Goa, Paris"
-                        value={formData.destination_choice}
-                        onChange={(e) => setFormData({ ...formData, destination_choice: e.target.value })}
-                      />
-                    </div>
-                  </div>
-                )}
-
-                <div className="space-y-4">
-                  <Label className="text-base font-medium">When are you free?</Label>
-
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div className="space-y-2">
-                      <Label htmlFor="date" className="text-sm text-muted-foreground">Date</Label>
-                      <Input id="date" type="date" min={today} value={formData.event_date} onChange={handleDateChange} required className="text-base h-12" data-testid="event-date-input" />
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label htmlFor="start_time" className="text-sm text-muted-foreground">Start</Label>
-                      <Input id="start_time" type="time" min={minStartTime} value={formData.start_time} onChange={handleStartTimeChange} required className="text-base h-12" data-testid="start-time-input" />
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label htmlFor="end_time" className="text-sm text-muted-foreground">End</Label>
-                      <Input id="end_time" type="time" min={minEndTime} value={formData.end_time} onChange={(e) => setFormData({ ...formData, end_time: e.target.value })} required className="text-base h-12" data-testid="end-time-input" />
-                    </div>
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="indoor-outdoor" className="text-base font-medium">Activity Type</Label>
-                  <Select value={formData.indoor_outdoor} onValueChange={(value) => setFormData({ ...formData, indoor_outdoor: value })}>
-                    <SelectTrigger className="text-lg h-12" data-testid="indoor-outdoor-select">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="indoor">Indoor Only</SelectItem>
-                      <SelectItem value="outdoor">Outdoor Only</SelectItem>
-                      <SelectItem value="both">Both Indoor & Outdoor</SelectItem>
-                    </SelectContent>
-                  </Select>
+                <div className="bg-muted/30 p-4 rounded-xl flex items-start gap-3">
+                  <Sparkles className="w-5 h-5 text-primary mt-0.5" />
+                  <p className="text-sm text-muted-foreground italic">
+                    All plans are generated for a single day. Make sure to select a window that fits your group's energy!
+                  </p>
                 </div>
 
                 <div className="space-y-2">
@@ -652,19 +743,7 @@ const GroupSetupPage = () => {
                   </Select>
                 </div>
 
-                {(formData.indoor_outdoor === 'indoor' || formData.indoor_outdoor === 'both') && (
-                  <div className="space-y-3">
-                    <Label className="text-base font-medium">Available Streaming Services</Label>
-                    <div className="grid grid-cols-2 gap-3">
-                      {ottOptions.map((ott) => (
-                        <div key={ott} className="flex items-center space-x-2">
-                          <Checkbox id={ott} checked={formData.ott_subscriptions.includes(ott)} onCheckedChange={(checked) => { if (checked) { setFormData({ ...formData, ott_subscriptions: [...formData.ott_subscriptions, ott] }); } else { setFormData({ ...formData, ott_subscriptions: formData.ott_subscriptions.filter(o => o !== ott) }); } }} data-testid={`ott-${ott.toLowerCase().replace(/\s+/g, '-')}`} />
-                          <Label htmlFor={ott} className="cursor-pointer">{ott}</Label>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
+
 
                 <Button type="submit" className="w-full rounded-full text-lg h-12 shadow-lg shadow-primary/20" disabled={loading} data-testid="create-group-submit-btn">
                   {loading ? 'Creating Plan...' : (isSoloPlan ? 'Start Planning' : 'Create Group')}

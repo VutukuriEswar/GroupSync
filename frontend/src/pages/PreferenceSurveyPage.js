@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useLocation } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { submitPreferences, getGroup } from '@/utils/api';
 import { Button } from '@/components/ui/button';
@@ -16,10 +16,12 @@ import { toast } from 'sonner';
 const PreferenceSurveyPage = () => {
   const { groupId } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const { user, isGuest } = useAuth();
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [group, setGroup] = useState(null);
+  const [isSolo, setIsSolo] = useState(location.state?.isSolo || false);
   const [currentQuestion, setCurrentQuestion] = useState(0);
   const [preferences, setPreferences] = useState({});
 
@@ -205,9 +207,15 @@ const PreferenceSurveyPage = () => {
     const init = async () => {
       try {
         const response = await getGroup(groupId);
-        setGroup(response.data);
+        const grp = response.data;
+        setGroup(grp);
 
-        if (response.data.status !== 'preferences') {
+        const soloFromConstraints = grp.members?.length <= 1;
+        const soloFromState = location.state?.isSolo || false;
+        const resolvedSolo = soloFromState || soloFromConstraints;
+        setIsSolo(resolvedSolo);
+
+        if (grp.status !== 'preferences') {
           toast.info('Waiting for the host to start the session...');
           navigate(`/group/${groupId}`);
           return;
@@ -228,7 +236,11 @@ const PreferenceSurveyPage = () => {
             is_registered: true
           });
 
-          navigate(`/group/${groupId}/waiting`);
+          if (resolvedSolo) {
+            navigate(`/group/${groupId}/recommendations`);
+          } else {
+            navigate(`/group/${groupId}/waiting`);
+          }
           return;
         }
 
@@ -241,7 +253,7 @@ const PreferenceSurveyPage = () => {
       }
     };
     init();
-  }, [groupId, navigate, user, isGuest]);
+  }, [groupId, navigate, user, isGuest, location.state]);
 
   const handleAnswer = (value) => {
     const question = questions[currentQuestion];
@@ -275,7 +287,6 @@ const PreferenceSurveyPage = () => {
     }
 
     try {
-
       const rlPreferences = transformPreferencesForRL(preferences);
 
       await submitPreferences({
@@ -286,7 +297,12 @@ const PreferenceSurveyPage = () => {
         is_registered: !!userId
       });
       toast.success('Preferences submitted!');
-      navigate(`/group/${groupId}/waiting`);
+
+      if (isSolo) {
+        navigate(`/group/${groupId}/recommendations`);
+      } else {
+        navigate(`/group/${groupId}/waiting`);
+      }
     } catch (error) {
       console.error(error);
       toast.error('Failed to submit preferences');

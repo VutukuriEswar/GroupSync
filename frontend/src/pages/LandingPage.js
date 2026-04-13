@@ -1,11 +1,13 @@
 import React, { useState } from 'react';
 import { motion } from 'framer-motion';
 import { useNavigate, Link } from 'react-router-dom';
+import { useAuth } from '@/contexts/AuthContext';
 import { Sparkles, Users, Brain, Shield, ArrowRight, CheckCircle2, Zap } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 const LandingPage = () => {
   const navigate = useNavigate();
+  const { isGuest } = useAuth();
   const [showAuth, setShowAuth] = useState(false);
 
   return (
@@ -23,20 +25,32 @@ const LandingPage = () => {
               <span className="text-2xl font-outfit font-bold">GroupSync</span>
             </div>
             <div className="flex items-center gap-4">
-              <Button
-                variant="ghost"
-                onClick={() => navigate('/login')}
-                data-testid="header-login-btn"
-              >
-                Login
-              </Button>
-              <Button
-                onClick={() => navigate('/register')}
-                className="rounded-full shadow-lg shadow-primary/20"
-                data-testid="header-register-btn"
-              >
-                Get Started
-              </Button>
+              {isGuest() ? (
+                <>
+                  <Button
+                    variant="ghost"
+                    onClick={() => navigate('/login')}
+                    data-testid="header-login-btn"
+                  >
+                    Login
+                  </Button>
+                  <Button
+                    onClick={() => navigate('/register')}
+                    className="rounded-full shadow-lg shadow-primary/20"
+                    data-testid="header-register-btn"
+                  >
+                    Get Started
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  onClick={() => navigate('/dashboard')}
+                  className="rounded-full shadow-lg shadow-primary/20"
+                  data-testid="header-dashboard-btn"
+                >
+                  Go to Dashboard <ArrowRight className="ml-2 w-4 h-4" />
+                </Button>
+              )}
             </div>
           </div>
         </header>

@@ -130,7 +130,7 @@ const DashboardPage = () => {
               <div className="flex items-center gap-4">
                 <div className="flex items-center gap-2 text-sm">
                   <User className="w-4 h-4" />
-                  <span>{user?.name}</span>
+                  <span>{user?.name || user?.email || 'User'}</span>
                 </div>
                 <Button variant="outline" size="sm" onClick={() => navigate('/profile')}>
                   Profile
@@ -154,7 +154,7 @@ const DashboardPage = () => {
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }}>
           <div className="text-center mb-12">
             <h1 className="text-5xl font-outfit font-black mb-4">
-              {isGuest() ? 'Welcome, Guest!' : `Welcome, ${user?.name}!`}
+              {isGuest() ? 'Welcome, Guest!' : `Welcome, ${user?.name || 'User'}!`}
             </h1>
             <p className="text-xl text-muted-foreground">
               Create a new group, join one, or plan a solo trip!
@@ -239,9 +239,11 @@ const DashboardPage = () => {
                                   <AlertCircle className="w-3 h-3" /> Time Passed
                                 </span>
                               )}
-                              <span className={`px-2 py-1 rounded-full text-xs font-semibold ${group.status === 'completed' ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'}`}>
-                                {group.status}
-                              </span>
+                              {group.status === 'completed' && (
+                                <span className="px-2 py-1 rounded-full text-xs font-semibold bg-green-100 text-green-700">
+                                  {group.status}
+                                </span>
+                              )}
                             </div>
                             <div className="flex items-center gap-4 text-sm text-muted-foreground">
                               <div className="flex items-center gap-1">
